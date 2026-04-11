@@ -1,0 +1,2 @@
+[console_scripts]
+facemesh = facemesh_app.main:main

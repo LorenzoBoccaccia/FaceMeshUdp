@@ -1,0 +1,27 @@
+Metadata-Version: 2.4
+Name: facemesh
+Version: 0.1.0
+Summary: Pure Python FaceMesh overlay + UDP app
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: mediapipe>=0.10.14
+Requires-Dist: opencv-python>=4.10.0.84
+Requires-Dist: numpy>=1.26.0
+Requires-Dist: pygame>=2.6.0
+Provides-Extra: dev
+Requires-Dist: pyinstaller>=6.11.0; extra == "dev"
+Requires-Dist: taskipy>=1.14.0; extra == "dev"
+
+﻿# FaceMesh (Python)
+
+Run directly:
+
+```powershell
+python -m facemesh_app.main --on
+```
+
+Build executable (inside the project venv):
+
+```powershell
+task build-exe
+```

@@ -3,9 +3,14 @@ Data Access Object for FaceMesh application.
 Provides basic data structures and utility functions for face mesh data capture.
 """
 
+import json
 import math
+import re
 import time
-from typing import Any, Optional, Dict, List
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Optional, Dict, List, Tuple
+import numpy as np
 
 
 LEFT_IRIS_CENTER_IDX = 468
@@ -39,6 +44,426 @@ RIGHT_EYE_KEY_IDXS = (
 )
 
 
+@dataclass
+class CalibrationMatrix:
+    """Stores calibration matrix coefficients for gaze tracking.
+    
+    The calibration matrix maps raw eye gaze angles to calibrated screen coordinates
+    using a 2x2 transformation matrix with center offset compensation.
+    
+    Default values create an identity transformation (no change to raw values).
+    
+    Attributes:
+        center_yaw: Eye yaw angle when looking at screen center (radians)
+        center_pitch: Eye pitch angle when looking at screen center (radians)
+        matrix_yaw_yaw: Scaling coefficient for yaw-to-yaw transformation
+        matrix_yaw_pitch: Cross-talk coefficient for pitch-to-yaw transformation
+        matrix_pitch_yaw: Cross-talk coefficient for yaw-to-pitch transformation
+        matrix_pitch_pitch: Scaling coefficient for pitch-to-pitch transformation
+        sample_count: Total number of samples used in calibration
+        timestamp_ms: Timestamp when calibration was created (milliseconds since epoch)
+    """
+    center_yaw: float = 0.0
+    center_pitch: float = 0.0
+    matrix_yaw_yaw: float = 1.0
+    matrix_yaw_pitch: float = 0.0
+    matrix_pitch_yaw: float = 0.0
+    matrix_pitch_pitch: float = 1.0
+    sample_count: int = 0
+    timestamp_ms: int = 0
+
+
+@dataclass
+class CalibrationPoint:
+    """Stores calibration data for a single screen position.
+    
+    Each calibration point represents the average eye measurements when the user
+    was looking at a specific target position on the screen.
+    
+    Attributes:
+        name: Point identifier ("C", "TL", "TC", "TR", "R", "BR", "BC", "BL", "L")
+        screen_x: Target screen X position (normalized 0-1 or pixels)
+        screen_y: Target screen Y position (normalized 0-1 or pixels)
+        raw_eye_yaw: Average combined eye yaw during sampling (radians)
+        raw_eye_pitch: Average combined eye pitch during sampling (radians)
+        raw_left_eye_yaw: Left eye specific yaw measurement (radians)
+        raw_left_eye_pitch: Left eye specific pitch measurement (radians)
+        raw_right_eye_yaw: Right eye specific yaw measurement (radians)
+        raw_right_eye_pitch: Right eye specific pitch measurement (radians)
+        sample_count: Number of samples averaged at this point
+    """
+    name: str
+    screen_x: float
+    screen_y: float
+    raw_eye_yaw: float
+    raw_eye_pitch: float
+    raw_left_eye_yaw: float
+    raw_left_eye_pitch: float
+    raw_right_eye_yaw: float
+    raw_right_eye_pitch: float
+    sample_count: int
+
+
+def compute_calibration_matrix(points: List[CalibrationPoint]) -> CalibrationMatrix:
+    """Compute calibration matrix from a set of calibration points.
+    
+    This function computes a 2x2 transformation matrix that maps raw eye gaze angles
+    to calibrated screen coordinates. It uses least squares regression to find the
+    optimal coefficients that minimize the error between predicted and actual screen
+    positions across all calibration points.
+    
+    The calibration requires exactly 9 points: one center point ("C") and 8 edge points
+    arranged around it. The center point provides the baseline (center_yaw, center_pitch),
+    while the edge points are used to compute the transformation matrix coefficients.
+    
+    The transformation model is:
+        screen_x_dev = matrix_yaw_yaw * raw_yaw_dev + matrix_yaw_pitch * raw_pitch_dev
+        screen_y_dev = matrix_pitch_yaw * raw_yaw_dev + matrix_pitch_pitch * raw_pitch_dev
+    
+    where "dev" denotes deviation from the center point values.
+    
+    Args:
+        points: List of CalibrationPoint objects containing calibration data.
+                Must contain exactly 9 points including a center point named "C".
+                
+    Returns:
+        CalibrationMatrix containing the computed transformation coefficients.
+        
+    Raises:
+        ValueError: If fewer than 9 points are provided or no center point exists.
+        
+    Notes:
+        - If least squares computation fails, returns identity matrix values
+          (1.0 for diagonals, 0.0 for off-diagonals).
+        - The function is robust to numerical issues and falls back gracefully
+          when computation cannot be completed successfully.
+    """
+    # Validate input
+    if len(points) < 9:
+        raise ValueError(f"Calibration requires at least 9 points, got {len(points)}")
+    
+    # Find center point
+    center_point = None
+    for point in points:
+        if point.name == "C":
+            center_point = point
+            break
+    
+    if center_point is None:
+        raise ValueError("Calibration points must include a center point named 'C'")
+    
+    # Extract edge points (all points except center)
+    edge_points = [p for p in points if p.name != "C"]
+    
+    # Initialize with identity matrix values in case of failure
+    matrix_yaw_yaw = 1.0
+    matrix_yaw_pitch = 0.0
+    matrix_pitch_yaw = 0.0
+    matrix_pitch_pitch = 1.0
+    
+    try:
+        # Build system of equations for least squares
+        # We have 8 equations (one per edge point) with 4 unknown coefficients
+        # Each edge point gives us 2 equations (one for screen_x, one for screen_y)
+        
+        A_rows = []  # Matrix of raw gaze deviations
+        b_yaw = []   # Screen X deviations (target for yaw equation)
+        b_pitch = [] # Screen Y deviations (target for pitch equation)
+        
+        for point in edge_points:
+            # Compute deviations from center in raw gaze space
+            raw_yaw_dev = point.raw_eye_yaw - center_point.raw_eye_yaw
+            raw_pitch_dev = point.raw_eye_pitch - center_point.raw_eye_pitch
+            
+            # Compute deviations from center in screen space
+            screen_x_dev = point.screen_x - center_point.screen_x
+            screen_y_dev = point.screen_y - center_point.screen_y
+            
+            # Add to system: A * coeffs = b
+            # For yaw equation: screen_x_dev = c00 * raw_yaw_dev + c01 * raw_pitch_dev
+            # For pitch equation: screen_y_dev = c10 * raw_yaw_dev + c11 * raw_pitch_dev
+            
+            A_rows.append([raw_yaw_dev, raw_pitch_dev])
+            b_yaw.append(screen_x_dev)
+            b_pitch.append(screen_y_dev)
+        
+        # Convert to numpy arrays
+        A = np.array(A_rows)
+        b_yaw_array = np.array(b_yaw)
+        b_pitch_array = np.array(b_pitch)
+        
+        # Solve for coefficients using least squares
+        # A * [c00, c01]^T = b_yaw  -> gives first row of matrix
+        # A * [c10, c11]^T = b_pitch -> gives second row of matrix
+        
+        try:
+            coeffs_yaw, _, _, _ = np.linalg.lstsq(A, b_yaw_array, rcond=None)
+            coeffs_pitch, _, _, _ = np.linalg.lstsq(A, b_pitch_array, rcond=None)
+            
+            # Extract coefficients
+            matrix_yaw_yaw = float(coeffs_yaw[0])
+            matrix_yaw_pitch = float(coeffs_yaw[1])
+            matrix_pitch_yaw = float(coeffs_pitch[0])
+            matrix_pitch_pitch = float(coeffs_pitch[1])
+            
+        except Exception:
+            # If least squares fails, keep identity matrix values
+            pass
+            
+    except Exception:
+        # If any computation fails, keep identity matrix values
+        pass
+    
+    # Compute total sample count
+    total_sample_count = sum(p.sample_count for p in points)
+    
+    # Create and return calibration matrix
+    return CalibrationMatrix(
+        center_yaw=center_point.raw_eye_yaw,
+        center_pitch=center_point.raw_eye_pitch,
+        matrix_yaw_yaw=matrix_yaw_yaw,
+        matrix_yaw_pitch=matrix_yaw_pitch,
+        matrix_pitch_yaw=matrix_pitch_yaw,
+        matrix_pitch_pitch=matrix_pitch_pitch,
+        sample_count=total_sample_count,
+        timestamp_ms=int(time.time() * 1000)
+    )
+
+
+def _profile_token(raw_profile: str) -> str:
+    """Sanitize profile name for safe filename usage.
+    
+    Converts a profile name into a safe token that can be used in filenames
+    by replacing non-alphanumeric characters with hyphens and stripping
+    leading/trailing punctuation characters.
+    
+    The sanitization rules are:
+    - Replace non-alphanumeric characters (except ., _, -) with hyphens
+    - Strip leading/trailing ., _, - characters
+    - Return "default" if the result is empty
+    
+    Args:
+        raw_profile: The raw profile name to sanitize.
+        
+    Returns:
+        A sanitized profile name safe for use in filenames, or "default"
+        if sanitization results in an empty string.
+        
+    Examples:
+        >>> _profile_token("")
+        "default"
+        >>> _profile_token("my-profile")
+        "my-profile"
+        >>> _profile_token("my profile!")
+        "my-profile-"
+        >>> _profile_token("  test  ")
+        "--test--"
+        >>> _profile_token("...test...")
+        "test"
+    """
+    if not raw_profile:
+        return "default"
+    
+    # Replace non-alphanumeric characters (except ., _, -) with hyphens
+    sanitized = re.sub(r'[^a-zA-Z0-9._-]', '-', raw_profile)
+    
+    # Strip leading/trailing ., _, - characters
+    sanitized = sanitized.strip('._-')
+    
+    # Return "default" if empty after sanitization
+    return sanitized if sanitized else "default"
+
+
+def save_calibration(calib: CalibrationMatrix, points: List[CalibrationPoint], profile: str = "") -> Path:
+    """Save calibration data to a JSON file.
+    
+    Serializes calibration matrix and calibration points to a JSON file
+    for persistent storage. The filename is generated based on the profile
+    name, allowing multiple calibration profiles to be stored separately.
+    
+    The file is saved with UTF-8 encoding and 2-space indentation for
+    human readability. The JSON structure includes:
+    - timestamp: Unix timestamp in milliseconds when calibration was saved
+    - profile: The profile name (sanitized)
+    - calibration: The calibration matrix coefficients
+    - points: List of calibration points with all measurements
+    
+    Args:
+        calib: The CalibrationMatrix object containing calibration coefficients.
+        points: List of CalibrationPoint objects with calibration measurements.
+        profile: Optional profile name for identifying the calibration.
+                If empty, filename will be "calibration.json".
+                Otherwise, filename will be "calibration-{profile}.json".
+        
+    Returns:
+        Path object representing the saved file.
+        
+    Raises:
+        IOError: If the file cannot be written.
+        TypeError: If serialization fails (e.g., invalid types).
+        
+    Examples:
+        >>> calib = CalibrationMatrix(...)
+        >>> points = [CalibrationPoint(...), ...]
+        >>> path = save_calibration(calib, points, "test-profile")
+        >>> print(path)
+        calibration-test-profile.json
+    """
+    # Sanitize profile name
+    profile_token = _profile_token(profile)
+    
+    # Generate filename
+    if profile_token == "default":
+        filename = "calibration.json"
+    else:
+        filename = f"calibration-{profile_token}.json"
+    
+    # Build JSON payload
+    payload = {
+        "timestamp": int(time.time() * 1000),
+        "profile": profile_token,
+        "calibration": {
+            "centerYaw": float(calib.center_yaw),
+            "centerPitch": float(calib.center_pitch),
+            "matrixYawYaw": float(calib.matrix_yaw_yaw),
+            "matrixYawPitch": float(calib.matrix_yaw_pitch),
+            "matrixPitchYaw": float(calib.matrix_pitch_yaw),
+            "matrixPitchPitch": float(calib.matrix_pitch_pitch),
+            "sampleCount": int(calib.sample_count)
+        },
+        "points": [
+            {
+                "name": str(point.name),
+                "screenX": float(point.screen_x),
+                "screenY": float(point.screen_y),
+                "rawEyeYaw": float(point.raw_eye_yaw),
+                "rawEyePitch": float(point.raw_eye_pitch),
+                "rawLeftEyeYaw": float(point.raw_left_eye_yaw),
+                "rawLeftEyePitch": float(point.raw_left_eye_pitch),
+                "rawRightEyeYaw": float(point.raw_right_eye_yaw),
+                "rawRightEyePitch": float(point.raw_right_eye_pitch),
+                "sampleCount": int(point.sample_count)
+            }
+            for point in points
+        ]
+    }
+    
+    # Write to file
+    file_path = Path(filename)
+    with file_path.open('w', encoding='utf-8') as f:
+        json.dump(payload, f, indent=2)
+    
+    return file_path
+
+
+def load_calibration(profile: str = "") -> Tuple[CalibrationMatrix, List[CalibrationPoint]]:
+    """Load calibration data from a JSON file.
+    
+    Loads and deserializes calibration matrix and calibration points from
+    a JSON file previously saved by save_calibration. The function handles
+    missing files and missing fields gracefully with sensible defaults.
+    
+    If the calibration file doesn't exist, returns a default empty calibration
+    matrix and empty points list. This allows the application to start without
+    requiring pre-existing calibration data.
+    
+    The function is tolerant to missing or malformed fields, using default
+    values (0.0 for floats, 0 for integers, empty strings for strings) when
+    needed. This ensures robustness when loading calibration files from
+    different versions or with partial data.
+    
+    Args:
+        profile: Optional profile name for identifying the calibration.
+                Must match the profile name used when saving.
+                If empty, looks for "calibration.json".
+                Otherwise, looks for "calibration-{profile}.json".
+        
+    Returns:
+        Tuple of (CalibrationMatrix, List[CalibrationPoint]).
+        If file doesn't exist, returns (CalibrationMatrix(), []).
+        
+    Examples:
+        >>> calib, points = load_calibration("test-profile")
+        >>> if not calib.sample_count:
+        ...     print("No calibration data found")
+        >>> else:
+        ...     print(f"Loaded {len(points)} calibration points")
+    """
+    # Sanitize profile name
+    profile_token = _profile_token(profile)
+    
+    # Generate filename
+    if profile_token == "default":
+        filename = "calibration.json"
+    else:
+        filename = f"calibration-{profile_token}.json"
+    
+    file_path = Path(filename)
+    
+    # Return empty calibration if file doesn't exist
+    if not file_path.exists():
+        return CalibrationMatrix(
+            center_yaw=0.0,
+            center_pitch=0.0,
+            matrix_yaw_yaw=1.0,
+            matrix_yaw_pitch=0.0,
+            matrix_pitch_yaw=0.0,
+            matrix_pitch_pitch=1.0,
+            sample_count=0,
+            timestamp_ms=int(time.time() * 1000)
+        ), []
+    
+    # Load and parse JSON
+    try:
+        with file_path.open('r', encoding='utf-8') as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        # Return empty calibration if file is invalid
+        return CalibrationMatrix(
+            center_yaw=0.0,
+            center_pitch=0.0,
+            matrix_yaw_yaw=1.0,
+            matrix_yaw_pitch=0.0,
+            matrix_pitch_yaw=0.0,
+            matrix_pitch_pitch=1.0,
+            sample_count=0,
+            timestamp_ms=int(time.time() * 1000)
+        ), []
+    
+    # Extract calibration data with defaults for missing fields
+    calib_data = data.get("calibration", {})
+    calib = CalibrationMatrix(
+        center_yaw=safe_float(calib_data.get("centerYaw", 0.0)),
+        center_pitch=safe_float(calib_data.get("centerPitch", 0.0)),
+        matrix_yaw_yaw=safe_float(calib_data.get("matrixYawYaw", 1.0)),
+        matrix_yaw_pitch=safe_float(calib_data.get("matrixYawPitch", 0.0)),
+        matrix_pitch_yaw=safe_float(calib_data.get("matrixPitchYaw", 0.0)),
+        matrix_pitch_pitch=safe_float(calib_data.get("matrixPitchPitch", 1.0)),
+        sample_count=int(calib_data.get("sampleCount", 0)),
+        timestamp_ms=int(data.get("timestamp", time.time() * 1000))
+    )
+    
+    # Extract calibration points with defaults for missing fields
+    points_data = data.get("points", [])
+    points = []
+    for point_data in points_data:
+        point = CalibrationPoint(
+            name=str(point_data.get("name", "")),
+            screen_x=safe_float(point_data.get("screenX", 0.0)),
+            screen_y=safe_float(point_data.get("screenY", 0.0)),
+            raw_eye_yaw=safe_float(point_data.get("rawEyeYaw", 0.0)),
+            raw_eye_pitch=safe_float(point_data.get("rawEyePitch", 0.0)),
+            raw_left_eye_yaw=safe_float(point_data.get("rawLeftEyeYaw", 0.0)),
+            raw_left_eye_pitch=safe_float(point_data.get("rawLeftEyePitch", 0.0)),
+            raw_right_eye_yaw=safe_float(point_data.get("rawRightEyeYaw", 0.0)),
+            raw_right_eye_pitch=safe_float(point_data.get("rawRightEyePitch", 0.0)),
+            sample_count=int(point_data.get("sampleCount", 0))
+        )
+        points.append(point)
+    
+    return calib, points
+
+
 def safe_float(v, fallback=0.0):
     """Safely convert value to float with fallback."""
     try:
@@ -56,16 +481,17 @@ def clamp(v, lo, hi):
 class FaceMeshEvent:
     """Wraps a raw MediaPipe FaceLandmarker result for one face."""
 
-    def __init__(self, result: Any = None, *, face_index: int = 0, ts: Optional[int] = None, event_type: str = "mesh"):
+    def __init__(self, result: Any = None, *, face_index: int = 0, ts: Optional[int] = None, event_type: str = "mesh", calibration: Optional['CalibrationMatrix'] = None):
         self.result = result
         self.face_index = int(face_index)
         self.type = str(event_type)
         self.ts = int(ts if ts is not None else time.time() * 1000)
+        self.calibration = calibration
 
     @classmethod
-    def from_landmarker_result(cls, result: Any, *, face_index: int = 0, ts: Optional[int] = None):
+    def from_landmarker_result(cls, result: Any, *, face_index: int = 0, ts: Optional[int] = None, calibration: Optional['CalibrationMatrix'] = None):
         """Build event directly from MediaPipe FaceLandmarker result."""
-        return cls(result, face_index=face_index, ts=ts, event_type="mesh")
+        return cls(result, face_index=face_index, ts=ts, event_type="mesh", calibration=calibration)
 
     def _face_item(self, attr_name: str):
         if self.result is None:
@@ -448,6 +874,109 @@ class FaceMeshEvent:
             self.landmark_xyz(RIGHT_EYE_LOWER_IDX),
         )
         return self._proxy_to_angle_deg(yp[1]) if yp is not None else None
+
+    def _apply_calibration(self, raw_yaw: float, raw_pitch: float, calib: CalibrationMatrix) -> tuple[float, float]:
+        """Apply calibration matrix to raw gaze angles.
+        
+        Args:
+            raw_yaw: Raw yaw angle in degrees
+            raw_pitch: Raw pitch angle in degrees
+            calib: Calibration matrix containing transformation coefficients
+            
+        Returns:
+            Tuple of (calibrated_yaw, calibrated_pitch) in degrees
+        """
+        dy = raw_yaw - calib.center_yaw
+        dp = raw_pitch - calib.center_pitch
+        calibrated_yaw = calib.matrix_yaw_yaw * dy + calib.matrix_yaw_pitch * dp + calib.center_yaw
+        calibrated_pitch = calib.matrix_pitch_yaw * dy + calib.matrix_pitch_pitch * dp + calib.center_pitch
+        return calibrated_yaw, calibrated_pitch
+
+    @property
+    def calibrated_left_eye_gaze_yaw(self) -> Optional[float]:
+        """Get calibrated left eye gaze yaw angle.
+        
+        Returns calibrated yaw when raw value exists, using identity transform
+        if no calibration is provided (i.e., returns raw values unchanged).
+        """
+        raw_yaw = self.left_eye_gaze_yaw
+        if raw_yaw is None:
+            return None
+        raw_pitch = self.left_eye_gaze_pitch or 0.0
+        calib = self.calibration if self.calibration is not None else CalibrationMatrix()
+        calibrated_yaw, _ = self._apply_calibration(raw_yaw, raw_pitch, calib)
+        return calibrated_yaw
+
+    @property
+    def calibrated_right_eye_gaze_yaw(self) -> Optional[float]:
+        """Get calibrated right eye gaze yaw angle.
+        
+        Returns calibrated yaw when raw value exists, using identity transform
+        if no calibration is provided (i.e., returns raw values unchanged).
+        """
+        raw_yaw = self.right_eye_gaze_yaw
+        if raw_yaw is None:
+            return None
+        raw_pitch = self.right_eye_gaze_pitch or 0.0
+        calib = self.calibration if self.calibration is not None else CalibrationMatrix()
+        calibrated_yaw, _ = self._apply_calibration(raw_yaw, raw_pitch, calib)
+        return calibrated_yaw
+
+    @property
+    def calibrated_left_eye_gaze_pitch(self) -> Optional[float]:
+        """Get calibrated left eye gaze pitch angle.
+        
+        Returns calibrated pitch when raw value exists, using identity transform
+        if no calibration is provided (i.e., returns raw values unchanged).
+        """
+        raw_yaw = self.left_eye_gaze_yaw or 0.0
+        raw_pitch = self.left_eye_gaze_pitch
+        if raw_pitch is None:
+            return None
+        calib = self.calibration if self.calibration is not None else CalibrationMatrix()
+        _, calibrated_pitch = self._apply_calibration(raw_yaw, raw_pitch, calib)
+        return calibrated_pitch
+
+    @property
+    def calibrated_right_eye_gaze_pitch(self) -> Optional[float]:
+        """Get calibrated right eye gaze pitch angle.
+        
+        Returns calibrated pitch when raw value exists, using identity transform
+        if no calibration is provided (i.e., returns raw values unchanged).
+        """
+        raw_yaw = self.right_eye_gaze_yaw or 0.0
+        raw_pitch = self.right_eye_gaze_pitch
+        if raw_pitch is None:
+            return None
+        calib = self.calibration if self.calibration is not None else CalibrationMatrix()
+        _, calibrated_pitch = self._apply_calibration(raw_yaw, raw_pitch, calib)
+        return calibrated_pitch
+
+    @property
+    def calibrated_combined_eye_gaze_yaw(self) -> Optional[float]:
+        """Get combined calibrated eye gaze yaw angle.
+        
+        Returns the average of calibrated left and right eye yaw values when both exist,
+        otherwise returns None.
+        """
+        left_yaw = self.calibrated_left_eye_gaze_yaw
+        right_yaw = self.calibrated_right_eye_gaze_yaw
+        if left_yaw is None or right_yaw is None:
+            return None
+        return (left_yaw + right_yaw) / 2.0
+
+    @property
+    def calibrated_combined_eye_gaze_pitch(self) -> Optional[float]:
+        """Get combined calibrated eye gaze pitch angle.
+        
+        Returns the average of calibrated left and right eye pitch values when both exist,
+        otherwise returns None.
+        """
+        left_pitch = self.calibrated_left_eye_gaze_pitch
+        right_pitch = self.calibrated_right_eye_gaze_pitch
+        if left_pitch is None or right_pitch is None:
+            return None
+        return (left_pitch + right_pitch) / 2.0
 
     @property
     def blendshapes(self) -> Optional[Dict]:

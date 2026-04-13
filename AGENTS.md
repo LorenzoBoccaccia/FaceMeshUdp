@@ -5,3 +5,7 @@
 - Fix bugs at the source, not by patching the effects.
 - Remove porkarounds don't build on top of them. 
 - We need solid foundation, not layers of fixes. Make it correct from the origin onward instead of fixing errors in place.
+
+python in .venv
+test with pytest under test folder
+docs under docs folder

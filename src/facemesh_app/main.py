@@ -18,7 +18,10 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
-from .facemesh_dao import FaceMeshEvent
+from .facemesh_dao import (
+    FaceMeshEvent, CalibrationMatrix, CalibrationPoint,
+    compute_calibration_matrix, save_calibration, load_calibration
+)
 from .capture import save_test_capture, reset_capture_dir, build_camera_capture_marked_image
 
 from .overlay import (
@@ -89,9 +92,10 @@ def ensure_model():
 class FaceMeshWorker(threading.Thread):
     """Worker thread for MediaPipe face mesh data capture."""
     
-    def __init__(self, args):
+    def __init__(self, args, calibration: Optional[CalibrationMatrix] = None):
         super().__init__(daemon=True)
         self.args = args
+        self.calibration = calibration
         self.stop_evt = threading.Event()
         self.ready_evt = threading.Event()
 
@@ -170,7 +174,7 @@ class FaceMeshWorker(threading.Thread):
 
                 frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
                 result = landmarker.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb))
-                evt = FaceMeshEvent.from_landmarker_result(result, ts=ms_now())
+                evt = FaceMeshEvent.from_landmarker_result(result, ts=ms_now(), calibration=self.calibration)
 
                 with self.lock:
                     self.seq += 1
@@ -195,10 +199,21 @@ class FaceMeshWorker(threading.Thread):
 
 
 def enrich_runtime_evt(evt: FaceMeshEvent, screen_w: float, screen_h: float) -> Dict:
-    """Extract raw face mesh data from event."""
+    """Extract raw face mesh data from event with calibrated gaze values."""
     if not evt:
         return None
-    return dict(evt.to_overlay_dict())
+    
+    result = dict(evt.to_overlay_dict())
+    
+    # Add calibrated gaze data for overlay rendering
+    result["calibrated_left_eye_gaze_yaw"] = evt.calibrated_left_eye_gaze_yaw
+    result["calibrated_left_eye_gaze_pitch"] = evt.calibrated_left_eye_gaze_pitch
+    result["calibrated_right_eye_gaze_yaw"] = evt.calibrated_right_eye_gaze_yaw
+    result["calibrated_right_eye_gaze_pitch"] = evt.calibrated_right_eye_gaze_pitch
+    result["calibrated_combined_eye_gaze_yaw"] = evt.calibrated_combined_eye_gaze_yaw
+    result["calibrated_combined_eye_gaze_pitch"] = evt.calibrated_combined_eye_gaze_pitch
+    
+    return result
 
 
 
@@ -299,6 +314,113 @@ def start_capture_loop(args, worker: FaceMeshWorker,
         cv2.destroyWindow(live_window_name)
 
 
+def run_calibration_workflow(args, worker: FaceMeshWorker, display: Dict):
+    """Run the 9-point calibration workflow to compute gaze tracking calibration matrix.
+    
+    This function orchestrates the complete calibration process:
+    1. Initializes overlay manager in calibration mode
+    2. Starts a 9-point calibration sequence (center, corners, and midpoints)
+    3. Collects eye gaze data at each calibration point
+    4. Computes the calibration matrix from collected data
+    5. Saves calibration to file for future use
+    
+    Args:
+        args: Command-line arguments object
+        worker: FaceMeshWorker instance providing face tracking events
+        display: Display configuration dict with 'width', 'height', 'x', 'y'
+        
+    Returns:
+        Tuple of (calib_matrix: CalibrationMatrix, calib_points: List[CalibrationPoint])
+        containing the computed calibration matrix and the collected calibration points.
+        
+    Raises:
+        RuntimeError: If worker has errors or calibration fails
+    """
+    from .facemesh_dao import compute_calibration_matrix, save_calibration
+    
+    print("Starting 9-point calibration workflow...", flush=True)
+    print("Please follow the on-screen instructions and look at each calibration point.", flush=True)
+    
+    try:
+        # Initialize overlay manager with calibration mode
+        overlay_manager = OverlayManager(display, capture_enabled=False,
+                                          overlay_fps=args.overlay_fps,
+                                          calibration_mode=True)
+        overlay_manager.initialize()
+        
+        # Start calibration sequence
+        overlay_manager.start_calibration_sequence(display["width"], display["height"])
+        
+        # Collect calibration points
+        calib_points: List[CalibrationPoint] = []
+        
+        # Main calibration loop
+        while True:
+            # Check for worker errors
+            if worker.error:
+                raise RuntimeError(f"Worker error during calibration: {worker.error}")
+            
+            # Handle overlay events and check if should exit
+            overlay_manager.handle_events()
+            if not overlay_manager.is_running():
+                print("Calibration cancelled by user.", flush=True)
+                break
+            
+            # Get latest event from worker
+            _, latest_evt = worker.snapshot()
+            evt_dict = enrich_runtime_evt(latest_evt, display["width"], display["height"])
+            
+            # Update calibration state
+            completed, calib_point = overlay_manager.update_calibration_state(evt_dict)
+            
+            # Render using the main render_mesh() method which handles calibration UI
+            overlay_manager.render_mesh(evt_dict)
+            
+            # Handle completed calibration point
+            if calib_point is not None:
+                calib_points.append(calib_point)
+                print(f"Calibration point {len(calib_points)}/9 completed at position '{calib_point.name}'.", flush=True)
+            
+            # Check if all points collected or calibration completed
+            if completed:
+                if len(calib_points) == 9:
+                    print("All 9 calibration points collected.", flush=True)
+                    break
+                else:
+                    print(f"Calibration sequence ended with {len(calib_points)} points.", flush=True)
+                    break
+            
+            # Small sleep to prevent busy-waiting
+            time.sleep(0.001)
+        
+        # Compute and save calibration if all points collected
+        calib_matrix = None
+        if len(calib_points) == 9:
+            print("Computing calibration matrix...", flush=True)
+            calib_matrix = compute_calibration_matrix(calib_points)
+            
+            # Save calibration to file
+            profile_name = getattr(args, 'calibration_profile', '') or "default"
+            calib_path = save_calibration(calib_matrix, calib_points, profile_name)
+            print(f"Calibration saved to: {calib_path}", flush=True)
+            print(f"Calibration matrix: yaw_offset={calib_matrix.center_yaw:.4f}, "
+                  f"pitch_offset={calib_matrix.center_pitch:.4f}, "
+                  f"samples={calib_matrix.sample_count}", flush=True)
+        else:
+            print(f"Insufficient calibration points ({len(calib_points)}/9). Cannot compute calibration matrix.", flush=True)
+        
+        return calib_matrix, calib_points
+        
+    except Exception as e:
+        print(f"Error during calibration: {e}", flush=True)
+        raise
+    finally:
+        # Cleanup overlay manager
+        if 'overlay_manager' in locals():
+            overlay_manager.shutdown()
+            print("Calibration overlay shutdown complete.", flush=True)
+
+
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="FaceMesh data capture app")
@@ -320,6 +442,16 @@ def parse_args():
     parser.add_argument("--overlay-fps", type=int, default=60,
                         help="Overlay refresh rate")
     
+    # Calibration options
+    parser.add_argument("--calibrate", action=argparse.BooleanOptionalAction, default=False,
+                        help="Run 9-point calibration workflow (primary flag)")
+    parser.add_argument("--calibration", action=argparse.BooleanOptionalAction, default=False,
+                        help="Run 9-point calibration workflow (alias for --calibrate)")
+    parser.add_argument("--calibration-profile", type=str, default="",
+                        help="Calibration profile name (uses calibration-{profile}.json instead of calibration.json)")
+    parser.add_argument("--force-recalibrate", action="store_true",
+                        help="Ignore existing calibration and force recalibration")
+    
     # Camera options
     parser.add_argument("--camera-index", type=int, default=int(os.getenv("CAMERA_INDEX", "0")),
                         help="Camera device index")
@@ -340,6 +472,9 @@ def parse_args():
 
 def normalize_runtime_args(args):
     """Validate and normalize runtime arguments."""
+    # Unify calibrate and calibration flags into should_calibrate
+    args.should_calibrate = args.calibrate or args.calibration
+    
     if args.capture_live and not args.capture:
         print("Live capture preview requires --capture; ignoring --capture-live.", flush=True)
         args.capture_live = False
@@ -358,9 +493,39 @@ def main():
     run_duration = max(0.0, args.duration)
     normalize_runtime_args(args)
 
+    # Handle calibration requirements
+    if args.should_calibrate and not args.overlay:
+        raise RuntimeError("Calibration mode requires overlay window. Please enable --overlay or remove --calibrate flag.")
+
     display = get_display_geo()
 
-    worker = FaceMeshWorker(args)
+    # Load calibration based on arguments
+    calibration = None
+    calibration_source = None
+    
+    if args.should_calibrate:
+        # Calibration mode - will run calibration workflow
+        print("Calibration mode requested. Running 9-point calibration workflow.", flush=True)
+        calibration_source = "new calibration"
+    elif args.force_recalibrate:
+        # Force recalibration - ignore existing calibration
+        print("Force recalibration requested. Will run calibration workflow.", flush=True)
+        calibration_source = "new calibration"
+    else:
+        # Try to load existing calibration
+        calibration, calib_points = load_calibration(args.calibration_profile)
+        if calibration.sample_count > 0:
+            profile_name = args.calibration_profile or "default"
+            print(f"Loaded calibration from profile '{profile_name}': "
+                  f"yaw_offset={calibration.center_yaw:.4f}, "
+                  f"pitch_offset={calibration.center_pitch:.4f}, "
+                  f"samples={calibration.sample_count}", flush=True)
+            calibration_source = f"loaded profile '{profile_name}'"
+        else:
+            print("No existing calibration found. Running in uncalibrated mode.", flush=True)
+            calibration_source = "uncalibrated"
+
+    worker = FaceMeshWorker(args, calibration=calibration)
     worker.start()
     if not worker.ready_evt.wait(timeout=20):
         raise RuntimeError("Timed out waiting for mesh worker init")
@@ -369,6 +534,7 @@ def main():
 
     print(f"App started on '{display['name']}' ({display['width']}x{display['height']}).", flush=True)
     print(f"Camera request: backend={args.camera_backend} index={args.camera_index}", flush=True)
+    print(f"Calibration status: {calibration_source}", flush=True)
     if args.capture:
         print(f"Capture mode enabled (--capture). Click to save mesh_capture_*.png/json into {Path('captures').resolve()}", flush=True)
     if args.capture and args.capture_live:
@@ -379,7 +545,24 @@ def main():
         print(f"Runtime: {int(run_duration)}s test mode.", flush=True)
 
     try:
-        start_capture_loop(args, worker, display, run_duration)
+        # Route to calibration workflow or normal capture loop
+        if args.should_calibrate or args.force_recalibrate:
+            # Run calibration workflow
+            calib_matrix, calib_points = run_calibration_workflow(args, worker, display)
+            
+            if calib_matrix:
+                # Update worker with new calibration
+                worker.calibration = calib_matrix
+                print("Calibration applied to worker.", flush=True)
+                
+                # After calibration, optionally run normal operation
+                # Continue with normal capture loop using the new calibration
+                start_capture_loop(args, worker, display, run_duration)
+            else:
+                print("Calibration failed or was cancelled. Exiting.", flush=True)
+        else:
+            # Normal operation with loaded or no calibration
+            start_capture_loop(args, worker, display, run_duration)
     finally:
         worker.stop()
         worker.join(timeout=3.0)

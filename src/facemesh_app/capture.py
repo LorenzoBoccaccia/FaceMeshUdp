@@ -319,7 +319,17 @@ def _draw_face_direction_from_ypr(
     pitch_deg: Any,
     roll_deg: Any,
 ) -> None:
-    """Draw face forward vector from yaw/pitch/roll at given origin."""
+    """Draw face forward vector from yaw/pitch/roll at given origin.
+    
+    Coordinate System Convention:
+    - Yaw: Positive values indicate turning RIGHT, negative values indicate turning LEFT
+    - Pitch: Positive values indicate tilting UP, negative values indicate tilting DOWN
+    - Roll: Positive values indicate rotating counter-clockwise (tipping left)
+    
+    The displayed arrow shows the direction the face is looking, with:
+    - Cyan arrow for face direction vector
+    - Orange tick mark for roll indication
+    """
     yaw = safe_float(yaw_deg, float("nan"))
     pitch = safe_float(pitch_deg, float("nan"))
     roll = safe_float(roll_deg, float("nan"))
@@ -330,6 +340,8 @@ def _draw_face_direction_from_ypr(
     pitch_r = math.radians(pitch)
 
     # Reconstruct normalized face-forward direction from yaw/pitch conventions.
+    # Right-positive yaw: fx = sin(yaw) (positive x when looking right)
+    # Up-positive pitch: fy = -sin(pitch) (negative y in image coords when looking up)
     fx = math.sin(yaw_r)
     fy = -math.sin(pitch_r)
     fz = -math.cos(yaw_r) * math.cos(pitch_r)
@@ -505,14 +517,27 @@ def build_camera_capture_marked_image(
     nose = _lm_to_px(landmarks[1], fw, fh, mirror_x=mirror_view) if len(landmarks) > 1 else (fw // 2, fh // 2)
 
     # Draw gaze vectors from yaw/pitch for each eye from pupil (iris center).
+    # Coordinate System Convention: right-positive, up-positive
     def _vector_from_yaw_pitch(yaw_deg, pitch_deg):
-        """Convert yaw/pitch to 3D direction vector."""
+        """Convert yaw/pitch to 3D direction vector.
+        
+        Coordinate System Convention:
+        - Yaw: Positive values indicate looking RIGHT, negative values indicate looking LEFT
+        - Pitch: Positive values indicate looking UP, negative values indicate looking DOWN
+        
+        Returns 3D direction vector [vx, vy, vz] where:
+        - vx: Horizontal component (positive = right)
+        - vy: Vertical component in image coordinates (negative = up in image space)
+        - vz: Depth component (positive = forward into the scene)
+        """
         yaw = safe_float(yaw_deg, float("nan"))
         pitch = safe_float(pitch_deg, float("nan"))
         if not (math.isfinite(yaw) and math.isfinite(pitch)):
             return None
         yaw_r = math.radians(yaw)
         pitch_r = math.radians(pitch)
+        # Right-positive yaw: vx = sin(yaw) * cos(pitch)
+        # Up-positive pitch: vy = -sin(pitch) (negative y in image coords when looking up)
         vx = math.sin(yaw_r) * math.cos(pitch_r)
         vy = -math.sin(pitch_r)
         vz = -math.cos(yaw_r) * math.cos(pitch_r)

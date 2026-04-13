@@ -479,7 +479,20 @@ def clamp(v, lo, hi):
 
 
 class FaceMeshEvent:
-    """Wraps a raw MediaPipe FaceLandmarker result for one face."""
+    """Wraps a raw MediaPipe FaceLandmarker result for one face.
+    
+    Coordinate System Convention:
+    - Head and eye gaze angles use a RIGHT-POSITIVE, UP-POSITIVE convention
+    - Yaw (horizontal rotation): Positive values indicate turning RIGHT, negative values indicate turning LEFT
+    - Pitch (vertical rotation): Positive values indicate tilting UP, negative values indicate tilting DOWN
+    - This convention is consistent across all head pose and eye gaze properties
+    
+    Example values:
+    - Head yaw: +23° = turning RIGHT, -23° = turning LEFT
+    - Head pitch: +39° = tilting UP, -39° = tilting DOWN
+    - Eye yaw: +12° = looking RIGHT, -12° = looking LEFT
+    - Eye pitch: +5° = looking UP, -5° = looking DOWN
+    """
 
     def __init__(self, result: Any = None, *, face_index: int = 0, ts: Optional[int] = None, event_type: str = "mesh", calibration: Optional['CalibrationMatrix'] = None):
         self.result = result
@@ -584,18 +597,28 @@ class FaceMeshEvent:
 
     @property
     def head_yaw(self) -> Optional[float]:
-        """Get head yaw angle."""
+        """Get head yaw angle (right-positive convention).
+        
+        Returns:
+            Head yaw angle in degrees. Positive values indicate turning RIGHT,
+            negative values indicate turning LEFT. Returns None if face not detected.
+        """
         m44 = self._transform_m44()
         if m44 is None:
             return None
         face_forward = self._normalize_vec3((-m44[0][2], -m44[1][2], -m44[2][2]))
         if face_forward is None:
             return None
-        return math.degrees(math.atan2(face_forward[0], -face_forward[2]))
+        return -math.degrees(math.atan2(face_forward[0], -face_forward[2]))
 
     @property
     def head_pitch(self) -> Optional[float]:
-        """Get head pitch angle."""
+        """Get head pitch angle (up-positive convention).
+        
+        Returns:
+            Head pitch angle in degrees. Positive values indicate tilting UP,
+            negative values indicate tilting DOWN. Returns None if face not detected.
+        """
         m44 = self._transform_m44()
         if m44 is None:
             return None
@@ -833,6 +856,12 @@ class FaceMeshEvent:
 
     @property
     def left_eye_gaze_yaw(self) -> Optional[float]:
+        """Get left eye gaze yaw angle (right-positive convention).
+        
+        Returns:
+            Left eye gaze yaw angle in degrees. Positive values indicate looking RIGHT,
+            negative values indicate looking LEFT. Returns None if eye landmarks not detected.
+        """
         yp = self._eye_gaze_raw_yaw_pitch(
             self.left_iris_center,
             self.landmark_xyz(LEFT_EYE_INNER_IDX),
@@ -844,6 +873,12 @@ class FaceMeshEvent:
 
     @property
     def right_eye_gaze_yaw(self) -> Optional[float]:
+        """Get right eye gaze yaw angle (right-positive convention).
+        
+        Returns:
+            Right eye gaze yaw angle in degrees. Positive values indicate looking RIGHT,
+            negative values indicate looking LEFT. Returns None if eye landmarks not detected.
+        """
         yp = self._eye_gaze_raw_yaw_pitch(
             self.right_iris_center,
             self.landmark_xyz(RIGHT_EYE_INNER_IDX),
@@ -855,6 +890,12 @@ class FaceMeshEvent:
 
     @property
     def left_eye_gaze_pitch(self) -> Optional[float]:
+        """Get left eye gaze pitch angle (up-positive convention).
+        
+        Returns:
+            Left eye gaze pitch angle in degrees. Positive values indicate looking UP,
+            negative values indicate looking DOWN. Returns None if eye landmarks not detected.
+        """
         yp = self._eye_gaze_raw_yaw_pitch(
             self.left_iris_center,
             self.landmark_xyz(LEFT_EYE_INNER_IDX),
@@ -866,6 +907,12 @@ class FaceMeshEvent:
 
     @property
     def right_eye_gaze_pitch(self) -> Optional[float]:
+        """Get right eye gaze pitch angle (up-positive convention).
+        
+        Returns:
+            Right eye gaze pitch angle in degrees. Positive values indicate looking UP,
+            negative values indicate looking DOWN. Returns None if eye landmarks not detected.
+        """
         yp = self._eye_gaze_raw_yaw_pitch(
             self.right_iris_center,
             self.landmark_xyz(RIGHT_EYE_INNER_IDX),
@@ -894,10 +941,12 @@ class FaceMeshEvent:
 
     @property
     def calibrated_left_eye_gaze_yaw(self) -> Optional[float]:
-        """Get calibrated left eye gaze yaw angle.
+        """Get calibrated left eye gaze yaw angle (right-positive convention).
         
-        Returns calibrated yaw when raw value exists, using identity transform
-        if no calibration is provided (i.e., returns raw values unchanged).
+        Returns:
+            Calibrated left eye gaze yaw angle in degrees. Positive values indicate looking RIGHT,
+            negative values indicate looking LEFT. Uses identity transform if no calibration
+            is provided (returns raw values unchanged). Returns None if raw value doesn't exist.
         """
         raw_yaw = self.left_eye_gaze_yaw
         if raw_yaw is None:
@@ -909,10 +958,12 @@ class FaceMeshEvent:
 
     @property
     def calibrated_right_eye_gaze_yaw(self) -> Optional[float]:
-        """Get calibrated right eye gaze yaw angle.
+        """Get calibrated right eye gaze yaw angle (right-positive convention).
         
-        Returns calibrated yaw when raw value exists, using identity transform
-        if no calibration is provided (i.e., returns raw values unchanged).
+        Returns:
+            Calibrated right eye gaze yaw angle in degrees. Positive values indicate looking RIGHT,
+            negative values indicate looking LEFT. Uses identity transform if no calibration
+            is provided (returns raw values unchanged). Returns None if raw value doesn't exist.
         """
         raw_yaw = self.right_eye_gaze_yaw
         if raw_yaw is None:
@@ -924,10 +975,12 @@ class FaceMeshEvent:
 
     @property
     def calibrated_left_eye_gaze_pitch(self) -> Optional[float]:
-        """Get calibrated left eye gaze pitch angle.
+        """Get calibrated left eye gaze pitch angle (up-positive convention).
         
-        Returns calibrated pitch when raw value exists, using identity transform
-        if no calibration is provided (i.e., returns raw values unchanged).
+        Returns:
+            Calibrated left eye gaze pitch angle in degrees. Positive values indicate looking UP,
+            negative values indicate looking DOWN. Uses identity transform if no calibration
+            is provided (returns raw values unchanged). Returns None if raw value doesn't exist.
         """
         raw_yaw = self.left_eye_gaze_yaw or 0.0
         raw_pitch = self.left_eye_gaze_pitch
@@ -939,10 +992,12 @@ class FaceMeshEvent:
 
     @property
     def calibrated_right_eye_gaze_pitch(self) -> Optional[float]:
-        """Get calibrated right eye gaze pitch angle.
+        """Get calibrated right eye gaze pitch angle (up-positive convention).
         
-        Returns calibrated pitch when raw value exists, using identity transform
-        if no calibration is provided (i.e., returns raw values unchanged).
+        Returns:
+            Calibrated right eye gaze pitch angle in degrees. Positive values indicate looking UP,
+            negative values indicate looking DOWN. Uses identity transform if no calibration
+            is provided (returns raw values unchanged). Returns None if raw value doesn't exist.
         """
         raw_yaw = self.right_eye_gaze_yaw or 0.0
         raw_pitch = self.right_eye_gaze_pitch
@@ -954,10 +1009,12 @@ class FaceMeshEvent:
 
     @property
     def calibrated_combined_eye_gaze_yaw(self) -> Optional[float]:
-        """Get combined calibrated eye gaze yaw angle.
+        """Get combined calibrated eye gaze yaw angle (right-positive convention).
         
-        Returns the average of calibrated left and right eye yaw values when both exist,
-        otherwise returns None.
+        Returns:
+            Average of calibrated left and right eye yaw values in degrees. Positive values
+            indicate looking RIGHT, negative values indicate looking LEFT. Returns None
+            if either eye's yaw value doesn't exist.
         """
         left_yaw = self.calibrated_left_eye_gaze_yaw
         right_yaw = self.calibrated_right_eye_gaze_yaw
@@ -967,10 +1024,12 @@ class FaceMeshEvent:
 
     @property
     def calibrated_combined_eye_gaze_pitch(self) -> Optional[float]:
-        """Get combined calibrated eye gaze pitch angle.
+        """Get combined calibrated eye gaze pitch angle (up-positive convention).
         
-        Returns the average of calibrated left and right eye pitch values when both exist,
-        otherwise returns None.
+        Returns:
+            Average of calibrated left and right eye pitch values in degrees. Positive values
+            indicate looking UP, negative values indicate looking DOWN. Returns None
+            if either eye's pitch value doesn't exist.
         """
         left_pitch = self.calibrated_left_eye_gaze_pitch
         right_pitch = self.calibrated_right_eye_gaze_pitch

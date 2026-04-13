@@ -264,11 +264,22 @@ class OverlayManager:
     def update_calibration_state(self, evt: Dict) -> Tuple[bool, Optional[CalibrationPoint]]:
         """Update calibration state based on elapsed time.
         
+        Coordinate System Convention:
+        - All eye gaze angles use right-positive, up-positive convention
+        - calibrated_combined_eye_gaze_yaw: Positive = looking RIGHT, negative = looking LEFT
+        - calibrated_combined_eye_gaze_pitch: Positive = looking UP, negative = looking DOWN
+        
         Manages phase transitions through: blink_pre -> countdown -> sampling -> blink_post.
         Collects eye gaze samples during sampling phase.
         
         Args:
-            evt: Face tracking event dict containing eye gaze data
+            evt: Face tracking event dict containing eye gaze data with keys:
+                - calibrated_combined_eye_gaze_yaw: Combined eye yaw angle (right-positive)
+                - calibrated_combined_eye_gaze_pitch: Combined eye pitch angle (up-positive)
+                - calibrated_left_eye_gaze_yaw: Left eye yaw angle (right-positive)
+                - calibrated_left_eye_gaze_pitch: Left eye pitch angle (up-positive)
+                - calibrated_right_eye_gaze_yaw: Right eye yaw angle (right-positive)
+                - calibrated_right_eye_gaze_pitch: Right eye pitch angle (up-positive)
             
         Returns:
             Tuple of (completed: bool, calibration_point: Optional[CalibrationPoint]).
@@ -416,11 +427,18 @@ class OverlayManager:
     def render_gaze_dot(self, evt: Optional[Dict]):
         """Render blue gaze dot showing calibrated eye gaze position in normal mode.
         
+        Coordinate System Convention:
+        - Gaze yaw: Positive values indicate looking RIGHT, negative values indicate looking LEFT
+        - Gaze pitch: Positive values indicate looking UP, negative values indicate looking DOWN
+        - Screen mapping: +yaw moves right from center, +pitch moves up from center
+        
         Converts calibrated eye gaze angles to screen coordinates and draws a blue circle
         with white ring at the computed gaze position.
         
         Args:
-            evt: Face tracking event dict containing calibrated gaze data
+            evt: Face tracking event dict containing calibrated gaze data with keys:
+                - calibrated_combined_eye_gaze_yaw: Horizontal gaze angle in degrees (right-positive)
+                - calibrated_combined_eye_gaze_pitch: Vertical gaze angle in degrees (up-positive)
         """
         if not evt:
             return

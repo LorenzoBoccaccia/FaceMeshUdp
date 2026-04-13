@@ -296,16 +296,18 @@ class OverlayManager:
                 
         elif self.calib_phase == "sampling":
             # Collect samples
-            if evt and "eyeGaze" in evt:
-                gaze = evt["eyeGaze"]
-                self.calib_samples.append({
-                    "eye_yaw": gaze.get("eyeYaw", 0.0),
-                    "eye_pitch": gaze.get("eyePitch", 0.0),
-                    "left_eye_yaw": gaze.get("leftEyeYaw", 0.0),
-                    "left_eye_pitch": gaze.get("leftEyePitch", 0.0),
-                    "right_eye_yaw": gaze.get("rightEyeYaw", 0.0),
-                    "right_eye_pitch": gaze.get("rightEyePitch", 0.0),
-                })
+            if evt:
+                combined_yaw = evt.get("calibrated_combined_eye_gaze_yaw")
+                combined_pitch = evt.get("calibrated_combined_eye_gaze_pitch")
+                if combined_yaw is not None and combined_pitch is not None:
+                    self.calib_samples.append({
+                        "eye_yaw": combined_yaw,
+                        "eye_pitch": combined_pitch,
+                        "left_eye_yaw": evt.get("calibrated_left_eye_gaze_yaw") or 0.0,
+                        "left_eye_pitch": evt.get("calibrated_left_eye_gaze_pitch") or 0.0,
+                        "right_eye_yaw": evt.get("calibrated_right_eye_gaze_yaw") or 0.0,
+                        "right_eye_pitch": evt.get("calibrated_right_eye_gaze_pitch") or 0.0,
+                    })
             
             if elapsed_ms >= CALIB_AVG_MS:
                 # Calculate averages and create CalibrationPoint

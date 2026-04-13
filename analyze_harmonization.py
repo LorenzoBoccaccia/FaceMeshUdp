@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 import math
 
+# Import FaceMeshDao to test its angle extraction
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+from facemesh_app.facemesh_dao import FaceMeshEvent
+
 
 def load_harmonization_data(data_dir: Path = Path("harmonization_data")) -> Dict[str, Any]:
     """Load all harmonization data files."""
@@ -326,39 +330,171 @@ def analyze_coordinate_system(data: Dict[str, Any]):
                 print("[OK] Eye pitch increases when looking DOWN")
             else:
                 print("[OK] Eye pitch increases when looking UP")
+
+    print("\n--- FACEMESHDAO ANGLE VALIDATION ---\n")
     
-    print("\n--- HEAD vs EYE CORRELATION ---\n")
+    # Test FaceMeshDao angle extraction
+    all_ok = True
     
-    # Compare head and eye movements for consistency
-    if "head-left" in head_points and "eye-left" in eye_points:
-        head_yaw = extract_head_angles(head_points["head-left"]["rawResult"])
-        eye_gaze = extract_eye_gaze(eye_points["eye-left"]["rawResult"])
+    # Check head yaw convention
+    if "head-left" in head_points and "head-right" in head_points:
+        left_event = FaceMeshEvent.from_landmarker_result(
+            _create_mock_result(head_points["head-left"]["rawResult"])
+        )
+        right_event = FaceMeshEvent.from_landmarker_result(
+            _create_mock_result(head_points["head-right"]["rawResult"])
+        )
         
-        if head_yaw and eye_gaze:
-            print(f"Looking LEFT:")
-            print(f"  Head yaw:  {head_yaw[0]:+.2f}°")
-            print(f"  Eye yaw:   {eye_gaze['combined_yaw']:+.2f}°")
-            
-            if (head_yaw[0] < 0 and eye_gaze['combined_yaw'] < 0) or (head_yaw[0] > 0 and eye_gaze['combined_yaw'] > 0):
-                print("  [OK] Both have same sign - consistent coordinate system")
-            else:
-                print("  [WARN] Different signs - potential sign inversion issue")
-    
-    if "head-up" in head_points and "eye-up" in eye_points:
-        head_pitch = extract_head_angles(head_points["head-up"]["rawResult"])
-        eye_gaze = extract_eye_gaze(eye_points["eye-up"]["rawResult"])
+        left_dao_yaw = left_event.head_yaw
+        right_dao_yaw = right_event.head_yaw
         
-        if head_pitch and eye_gaze:
-            print(f"\nLooking UP:")
-            print(f"  Head pitch: {head_pitch[1]:+.2f}°")
-            print(f"  Eye pitch:  {eye_gaze['combined_pitch']:+.2f}°")
+        if left_dao_yaw is not None and right_dao_yaw is not None:
+            print(f"FaceMeshDao Head Left:  yaw={left_dao_yaw:+.2f}°")
+            print(f"FaceMeshDao Head Right: yaw={right_dao_yaw:+.2f}°")
             
-            if (head_pitch[1] < 0 and eye_gaze['combined_pitch'] < 0) or (head_pitch[1] > 0 and eye_gaze['combined_pitch'] > 0):
-                print("  [OK] Both have same sign - consistent coordinate system")
+            yaw_diff = right_dao_yaw - left_dao_yaw
+            print(f"FaceMeshDao Yaw difference: {yaw_diff:+.2f}°")
+            
+            if yaw_diff > 0:
+                print("[OK] FaceMeshDao: Yaw increases when turning head RIGHT")
             else:
-                print("  [WARN] Different signs - potential sign inversion issue")
+                print("[FAIL] FaceMeshDao: Yaw does NOT follow right-positive convention")
+                all_ok = False
+        else:
+            print("[WARN] FaceMeshDao: Could not extract head yaw angles")
+    
+    # Check head pitch convention
+    if "head-up" in head_points and "head-down" in head_points:
+        up_event = FaceMeshEvent.from_landmarker_result(
+            _create_mock_result(head_points["head-up"]["rawResult"])
+        )
+        down_event = FaceMeshEvent.from_landmarker_result(
+            _create_mock_result(head_points["head-down"]["rawResult"])
+        )
+        
+        up_dao_pitch = up_event.head_pitch
+        down_dao_pitch = down_event.head_pitch
+        
+        if up_dao_pitch is not None and down_dao_pitch is not None:
+            print(f"\nFaceMeshDao Head Up:   pitch={up_dao_pitch:+.2f}°")
+            print(f"FaceMeshDao Head Down: pitch={down_dao_pitch:+.2f}°")
+            
+            pitch_diff = down_dao_pitch - up_dao_pitch
+            print(f"FaceMeshDao Pitch difference: {pitch_diff:+.2f}°")
+            
+            if pitch_diff < 0:
+                print("[OK] FaceMeshDao: Pitch increases when tilting head UP")
+            else:
+                print("[FAIL] FaceMeshDao: Pitch does NOT follow up-positive convention")
+                all_ok = False
+        else:
+            print("[WARN] FaceMeshDao: Could not extract head pitch angles")
+    
+    # Check eye yaw convention
+    if "eye-left" in eye_points and "eye-right" in eye_points:
+        left_event = FaceMeshEvent.from_landmarker_result(
+            _create_mock_result(eye_points["eye-left"]["rawResult"])
+        )
+        right_event = FaceMeshEvent.from_landmarker_result(
+            _create_mock_result(eye_points["eye-right"]["rawResult"])
+        )
+        
+        left_dao_yaw = left_event.left_eye_gaze_yaw
+        right_dao_yaw = right_event.left_eye_gaze_yaw
+        
+        if left_dao_yaw is not None and right_dao_yaw is not None:
+            print(f"\nFaceMeshDao Eye Left:  left_eye_yaw={left_dao_yaw:+.2f}°")
+            print(f"FaceMeshDao Eye Right: left_eye_yaw={right_dao_yaw:+.2f}°")
+            
+            yaw_diff = right_dao_yaw - left_dao_yaw
+            print(f"FaceMeshDao Eye yaw difference: {yaw_diff:+.2f}°")
+            
+            if yaw_diff > 0:
+                print("[OK] FaceMeshDao: Eye yaw increases when looking RIGHT")
+            else:
+                print("[FAIL] FaceMeshDao: Eye yaw does NOT follow right-positive convention")
+                print(f"  -> Looking LEFT gives {left_dao_yaw:+.2f}°, looking RIGHT gives {right_dao_yaw:+.2f}°")
+                print(f"  -> Expected: looking RIGHT should be MORE positive than LEFT")
+                all_ok = False
+        else:
+            print("[WARN] FaceMeshDao: Could not extract eye yaw angles")
+    
+    # Check eye pitch convention
+    if "eye-up" in eye_points and "eye-down" in eye_points:
+        up_event = FaceMeshEvent.from_landmarker_result(
+            _create_mock_result(eye_points["eye-up"]["rawResult"])
+        )
+        down_event = FaceMeshEvent.from_landmarker_result(
+            _create_mock_result(eye_points["eye-down"]["rawResult"])
+        )
+        
+        up_dao_pitch = up_event.left_eye_gaze_pitch
+        down_dao_pitch = down_event.left_eye_gaze_pitch
+        
+        if up_dao_pitch is not None and down_dao_pitch is not None:
+            print(f"\nFaceMeshDao Eye Up:   left_eye_pitch={up_dao_pitch:+.2f}°")
+            print(f"FaceMeshDao Eye Down: left_eye_pitch={down_dao_pitch:+.2f}°")
+            
+            pitch_diff = down_dao_pitch - up_dao_pitch
+            print(f"FaceMeshDao Eye pitch difference: {pitch_diff:+.2f}°")
+            
+            if pitch_diff < 0:
+                print("[OK] FaceMeshDao: Eye pitch increases when looking UP")
+            else:
+                print("[FAIL] FaceMeshDao: Eye pitch does NOT follow up-positive convention")
+                print(f"  -> Looking UP gives {up_dao_pitch:+.2f}°, looking DOWN gives {down_dao_pitch:+.2f}°")
+                print(f"  -> Expected: looking UP should be MORE positive than DOWN")
+                all_ok = False
+        else:
+            print("[WARN] FaceMeshDao: Could not extract eye pitch angles")
     
     print("\n" + "="*100)
+    if all_ok:
+        print("[OK] FaceMeshDao ANGLE CONVENTION VALIDATION: ALL TESTS PASSED")
+    else:
+        print("[FAIL] FaceMeshDao ANGLE CONVENTION VALIDATION: SOME TESTS FAILED")
+    print("="*100 + "\n")
+
+
+def _create_mock_result(raw_result: Dict[str, Any]) -> Any:
+    """Create a mock MediaPipe result object from raw JSON data.
+    
+    This creates a minimal mock object that FaceMeshEvent can work with.
+    The mock has the same structure as a real MediaPipe FaceLandmarker result.
+    """
+    from types import SimpleNamespace
+    
+    # Extract facial transformation matrix
+    facial_transformation_matrix = raw_result.get("facial_transformation_matrix")
+    if facial_transformation_matrix is None:
+        # Return minimal mock
+        return SimpleNamespace(
+            facial_transformation_matrix=None,
+            face_landmarks=[]
+        )
+    
+    # Extract face landmarks
+    face_landmarks_data = raw_result.get("face_landmarks", [])
+    face_landmarks = []
+    for lm_data in face_landmarks_data:
+        if lm_data is None:
+            face_landmarks.append(None)
+        else:
+            face_landmarks.append(SimpleNamespace(
+                x=lm_data.get("x"),
+                y=lm_data.get("y"),
+                z=lm_data.get("z")
+            ))
+    
+    # Create mock result object
+    class MockResult:
+        def __init__(self):
+            # FaceMeshDao expects facial_transformation_matrixes (plural)
+            self.facial_transformation_matrixes = [facial_transformation_matrix]
+            self.face_landmarks = [face_landmarks]  # Wrap in list for multi-face support
+            self.face_blendshapes = []
+    
+    return MockResult()
 
 
 def main():

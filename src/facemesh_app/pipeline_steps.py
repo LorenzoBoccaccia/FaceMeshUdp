@@ -1,0 +1,779 @@
+"""
+Pipeline steps for face processing.
+Each step processes data and passes it to the next step in the pipeline.
+"""
+
+import json
+import logging
+import socket
+from typing import List, Optional
+
+import cv2
+import mediapipe as mp
+import numpy as np
+from mediapipe.tasks.python import vision
+
+from .facemesh_dao import FaceMeshEvent, CalibratedFaceAndGazeEvent
+
+logger = logging.getLogger(__name__)
+
+
+class FaceMeshStep:
+    """First pipeline step: Extract face mesh data from frames using MediaPipe FaceLandmarker."""
+    
+    def __init__(self, face_landmarker: vision.FaceLandmarker):
+        """Initialize FaceMeshStep.
+        
+        Args:
+            face_landmarker: Initialized MediaPipe FaceLandmarker instance
+        """
+        self.face_landmarker = face_landmarker
+    
+    def receive_frame(self, frame, timestamp_ms: int) -> Optional[FaceMeshEvent]:
+        """Process a frame and return face mesh data.
+        
+        Args:
+            frame: Input frame as numpy array (BGR format)
+            timestamp_ms: Frame timestamp in milliseconds
+            
+        Returns:
+            FaceMeshEvent if face detected, None otherwise
+        """
+        if frame is None:
+            logger.warning("Received None frame in FaceMeshStep")
+            return None
+        
+        try:
+            # Convert BGR to RGB for MediaPipe
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Create MediaPipe image
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+            
+            # Run face landmarker
+            result = self.face_landmarker.detect(mp_image)
+            
+            # Create FaceMeshEvent from result
+            evt = FaceMeshEvent.from_landmarker_result(result, ts=timestamp_ms)
+            
+            if evt.has_face:
+                logger.debug(f"Face detected - landmarks: {evt.landmark_count}")
+            else:
+                logger.debug("No face detected in frame")
+            
+            return evt
+            
+        except Exception as e:
+            logger.warning(f"Error processing frame in FaceMeshStep: {e}")
+            return None
+
+
+class CalibrationAdapterStep:
+    """Second pipeline step: Convert FaceMeshEvent to CalibratedFaceAndGazeEvent.
+    
+    This adapter step bridges the face mesh data with calibration and display geometry
+    to create the comprehensive event used by downstream steps.
+    """
+    
+    def __init__(self,
+                 pitch_calibration: float = 0.0,
+                 yaw_calibration: float = 0.0,
+                 roll_calibration: float = 0.0,
+                 display_width: int = 1920,
+                 display_height: int = 1080,
+                 origin_x: float = 960.0,
+                 origin_y: float = 540.0):
+        """Initialize CalibrationAdapterStep.
+        
+        Args:
+            pitch_calibration: Pitch calibration value in degrees
+            yaw_calibration: Yaw calibration value in degrees
+            roll_calibration: Roll calibration value in degrees
+            display_width: Display width in pixels
+            display_height: Display height in pixels
+            origin_x: X coordinate of origin (e.g., screen center)
+            origin_y: Y coordinate of origin
+        """
+        self.pitch_calibration = float(pitch_calibration)
+        self.yaw_calibration = float(yaw_calibration)
+        self.roll_calibration = float(roll_calibration)
+        self.display_width = int(display_width)
+        self.display_height = int(display_height)
+        self.origin_x = float(origin_x)
+        self.origin_y = float(origin_y)
+    
+    def update_calibration(self,
+                          pitch: float,
+                          yaw: float,
+                          roll: float) -> None:
+        """Update calibration values.
+        
+        Args:
+            pitch: New pitch calibration value in degrees
+            yaw: New yaw calibration value in degrees
+            roll: New roll calibration value in degrees
+        """
+        self.pitch_calibration = float(pitch)
+        self.yaw_calibration = float(yaw)
+        self.roll_calibration = float(roll)
+        logger.debug(f"Calibration updated: pitch={pitch}, yaw={yaw}, roll={roll}")
+    
+    def update_display_geometry(self,
+                                width: int,
+                                height: int,
+                                origin_x: float,
+                                origin_y: float) -> None:
+        """Update display geometry.
+        
+        Args:
+            width: Display width in pixels
+            height: Display height in pixels
+            origin_x: X coordinate of origin
+            origin_y: Y coordinate of origin
+        """
+        self.display_width = int(width)
+        self.display_height = int(height)
+        self.origin_x = float(origin_x)
+        self.origin_y = float(origin_y)
+        logger.debug(f"Display geometry updated: {width}x{height}, origin=({origin_x}, {origin_y})")
+    
+    def receive_frame(self,
+                     frame: np.ndarray,
+                     face_mesh_event: Optional[FaceMeshEvent]) -> Optional[CalibratedFaceAndGazeEvent]:
+        """Create CalibratedFaceAndGazeEvent from FaceMeshEvent.
+        
+        This method combines the face mesh data with calibration and display geometry
+        to create a comprehensive event for downstream processing.
+        
+        Args:
+            frame: Input frame (may be needed for future extensions)
+            face_mesh_event: Face mesh data from FaceMeshStep
+            
+        Returns:
+            CalibratedFaceAndGazeEvent if face_mesh_event is not None, None otherwise
+        """
+        if face_mesh_event is None:
+            logger.debug("FaceMeshEvent is None, returning None")
+            return None
+        
+        try:
+            calibrated_event = CalibratedFaceAndGazeEvent(
+                face_mesh_event=face_mesh_event,
+                pitch_calibration=self.pitch_calibration,
+                yaw_calibration=self.yaw_calibration,
+                roll_calibration=self.roll_calibration,
+                display_width=self.display_width,
+                display_height=self.display_height,
+                origin_x=self.origin_x,
+                origin_y=self.origin_y
+            )
+            
+            if face_mesh_event.has_face:
+                logger.debug("CalibratedFaceAndGazeEvent created with face data")
+            else:
+                logger.debug("CalibratedFaceAndGazeEvent created without face data")
+            
+            return calibrated_event
+            
+        except Exception as e:
+            logger.warning(f"Error creating CalibratedFaceAndGazeEvent: {e}")
+            return None
+
+
+class CalibrationControllerStep:
+    """Manages 9-point calibration workflow with state tracking for calibration points.
+    
+    This class implements the state machine logic for collecting calibration data
+    at multiple points during the calibration process.
+    """
+    
+    def __init__(self,
+                 face_landmarker: vision.FaceLandmarker,
+                 num_points: int = 9,
+                 threshold: float = 0.5,
+                 min_samples: int = 5):
+        """Initialize CalibrationControllerStep.
+        
+        Args:
+            face_landmarker: Initialized MediaPipe FaceLandmarker instance for face detection
+            num_points: Number of calibration points (default: 9)
+            threshold: Stability threshold for sample collection in degrees (default: 0.5)
+            min_samples: Minimum number of samples required per calibration point (default: 5)
+        """
+        self.face_landmarker = face_landmarker
+        self.num_points = num_points
+        self.threshold = threshold
+        self.min_samples = min_samples
+        self.current_point_index = 0
+        self.calibration_samples: List[dict] = []
+        self.current_point_samples: List[dict] = []
+        self.is_complete = False
+        logger.debug(f"CalibrationControllerStep initialized: num_points={num_points}, threshold={threshold}")
+    
+    def start_calibration(self) -> None:
+        """Start or restart calibration process."""
+        self.current_point_index = 0
+        self.calibration_samples = []
+        self.current_point_samples = []
+        self.is_complete = False
+        logger.info("Calibration process started")
+    
+    def receive_frame(self, frame: np.ndarray) -> Optional[dict]:
+        """Process frame during calibration.
+        
+        Args:
+            frame: Input frame for calibration (BGR format)
+            
+        Returns:
+            Calibration data dict if complete, None otherwise.
+            When complete, returns dict with calibration values (pitch/yaw/roll averages)
+        """
+        if frame is None:
+            logger.warning("Received None frame in CalibrationControllerStep")
+            return None
+        
+        if self.is_complete:
+            logger.debug("Calibration already complete, ignoring frame")
+            return None
+        
+        try:
+            # Convert BGR to RGB for MediaPipe
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Create MediaPipe image
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+            
+            # Run face landmarker
+            result = self.face_landmarker.detect(mp_image)
+            
+            # Check if face detected
+            if not result.face_landmarks:
+                logger.debug("No face detected in calibration frame")
+                return None
+            
+            # Create FaceMeshEvent to get head pose data
+            face_mesh_event = FaceMeshEvent.from_landmarker_result(result, ts=0)
+            
+            if not face_mesh_event.has_face:
+                logger.debug("No valid face data in calibration frame")
+                return None
+            
+            # Get head pose values
+            head_pitch = face_mesh_event.head_pitch if face_mesh_event.head_pitch is not None else 0.0
+            head_yaw = face_mesh_event.head_yaw if face_mesh_event.head_yaw is not None else 0.0
+            # Roll is not directly available in FaceMeshEvent, use 0.0 for now
+            head_roll = 0.0
+            
+            # Collect sample for current calibration point
+            sample = {
+                'point_index': self.current_point_index,
+                'pitch': head_pitch,
+                'yaw': head_yaw,
+                'roll': head_roll
+            }
+            self.current_point_samples.append(sample)
+            
+            logger.debug(f"Collected sample {len(self.current_point_samples)} for point {self.current_point_index}: "
+                        f"pitch={sample['pitch']:.2f}, yaw={sample['yaw']:.2f}, roll={sample['roll']:.2f}")
+            
+            # Check if we have enough samples for this point
+            if len(self.current_point_samples) >= self.min_samples:
+                # Calculate stability
+                if self._check_stability(self.current_point_samples):
+                    # Point complete, save samples and move to next point
+                    self.calibration_samples.extend(self.current_point_samples)
+                    logger.info(f"Calibration point {self.current_point_index} complete with "
+                               f"{len(self.current_point_samples)} samples")
+                    
+                    # Reset current point samples
+                    self.current_point_samples = []
+                    
+                    # Move to next point
+                    self.current_point_index += 1
+                    
+                    # Check if calibration is complete
+                    if self.current_point_index >= self.num_points:
+                        self.is_complete = True
+                        return self._calculate_calibration_results()
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Error processing calibration frame: {e}")
+            return None
+    
+    def _check_stability(self, samples: List[dict]) -> bool:
+        """Check if samples are stable enough to move to next point.
+        
+        Args:
+            samples: List of sample dicts with pitch, yaw, roll values
+            
+        Returns:
+            True if samples are stable within threshold, False otherwise
+        """
+        if len(samples) < 2:
+            return False
+        
+        # Calculate standard deviation for each angle
+        pitches = [s['pitch'] for s in samples]
+        yaws = [s['yaw'] for s in samples]
+        rolls = [s['roll'] for s in samples]
+        
+        pitch_std = np.std(pitches)
+        yaw_std = np.std(yaws)
+        roll_std = np.std(rolls)
+        
+        # Check if all angles are stable within threshold
+        is_stable = (pitch_std < self.threshold and
+                    yaw_std < self.threshold and
+                    roll_std < self.threshold)
+        
+        if is_stable:
+            logger.debug(f"Samples stable: pitch_std={pitch_std:.3f}, yaw_std={yaw_std:.3f}, "
+                        f"roll_std={roll_std:.3f}")
+        else:
+            logger.debug(f"Samples not stable: pitch_std={pitch_std:.3f}, yaw_std={yaw_std:.3f}, "
+                        f"roll_std={roll_std:.3f}")
+        
+        return is_stable
+    
+    def _calculate_calibration_results(self) -> dict:
+        """Calculate average calibration values from collected samples.
+        
+        Returns:
+            Dict with average pitch, yaw, and roll values
+        """
+        if not self.calibration_samples:
+            logger.warning("No calibration samples to calculate results")
+            return {'pitch': 0.0, 'yaw': 0.0, 'roll': 0.0}
+        
+        # Calculate averages for each angle
+        pitches = [s['pitch'] for s in self.calibration_samples]
+        yaws = [s['yaw'] for s in self.calibration_samples]
+        rolls = [s['roll'] for s in self.calibration_samples]
+        
+        avg_pitch = float(np.mean(pitches))
+        avg_yaw = float(np.mean(yaws))
+        avg_roll = float(np.mean(rolls))
+        
+        results = {
+            'pitch': avg_pitch,
+            'yaw': avg_yaw,
+            'roll': avg_roll,
+            'total_samples': len(self.calibration_samples)
+        }
+        
+        logger.info(f"Calibration complete: pitch={avg_pitch:.2f}, yaw={avg_yaw:.2f}, "
+                   f"roll={avg_roll:.2f}, samples={len(self.calibration_samples)}")
+        
+        return results
+    
+    def get_current_point_index(self) -> int:
+        """Get current calibration point index (0-based).
+        
+        Returns:
+            Current point index, or num_points if complete
+        """
+        return self.current_point_index
+    
+    def get_progress(self) -> float:
+        """Get calibration progress (0.0 to 1.0).
+        
+        Returns:
+            Progress as a float between 0.0 and 1.0
+        """
+        if self.num_points == 0:
+            return 1.0
+        return min(self.current_point_index / self.num_points, 1.0)
+    
+    def is_calibration_complete(self) -> bool:
+        """Check if calibration is complete.
+        
+        Returns:
+            True if calibration is complete, False otherwise
+        """
+        return self.is_complete
+
+
+class CaptureStep:
+    """Fourth pipeline step: Handle live preview display and frame counting.
+    
+    This step displays processed frames with overlays when enabled.
+    It tracks frame count for statistics and handles keyboard input for quitting.
+    Note: Actual capture saving is handled via callback mechanism in FrameDispatcher.
+    """
+    
+    def __init__(self, enabled: bool = True):
+        """Initialize capture step.
+        
+        Args:
+            enabled: Whether capture step is active
+        """
+        self.enabled = enabled
+        self.frame_count = 0
+    
+    def set_enabled(self, enabled: bool) -> None:
+        """Enable or disable capture step.
+        
+        Args:
+            enabled: Whether to enable the capture step
+        """
+        self.enabled = enabled
+    
+    def receive_frame(self,
+                     frame: np.ndarray,
+                     face_mesh_event: Optional[FaceMeshEvent],
+                     calibrated_event: Optional[CalibratedFaceAndGazeEvent]) -> None:
+        """Process frame for capture/live preview.
+        
+        Args:
+            frame: Input frame
+            face_mesh_event: Face mesh data (optional)
+            calibrated_event: Calibrated face and gaze data (optional)
+            
+        Note:
+            This method doesn't return anything - it handles display internally.
+            Capture saving is handled via callback mechanism.
+        """
+        if not self.enabled:
+            return
+        
+        if frame is None:
+            logger.warning("Received None frame in CaptureStep")
+            return
+        
+        # Increment frame count
+        self.frame_count += 1
+        
+        # Display frame with overlays
+        cv2.imshow('FaceMesh Live Preview', frame)
+        
+        # Handle keyboard input (ESC to quit)
+        key = cv2.waitKey(1) & 0xFF
+        if key == 27:  # ESC key
+            logger.info("ESC pressed - capture step will exit")
+            # Note: Actual exit handling should be done by the application loop
+            # This step just processes the key press
+    
+    def get_frame_count(self) -> int:
+        """Get total number of frames processed.
+        
+        Returns:
+            Total frame count
+        """
+        return self.frame_count
+
+
+class OverlayStep:
+    """Fifth pipeline step: Render gaze dot and HUD overlay on frames.
+    
+    This step provides visual feedback by rendering a gaze dot showing the
+    calibrated gaze position and optional HUD information with calibration status
+    and head pose values.
+    """
+    
+    # Constants for rendering
+    DOT_RADIUS = 14
+    SCALE = 14.0  # Pixels per degree
+    BLUE = (70, 180, 255)  # Gaze dot color (same as overlay.py)
+    WHITE = (255, 255, 255)
+    HUD_BG = (20, 20, 20)
+    FONT_SCALE = 0.5
+    FONT_THICKNESS = 1
+    
+    def __init__(self, enabled: bool = True, show_hud: bool = True):
+        """Initialize overlay step.
+        
+        Args:
+            enabled: Whether overlay rendering is active
+            show_hud: Whether to show HUD information
+        """
+        self.enabled = enabled
+        self.show_hud = show_hud
+    
+    def set_enabled(self, enabled: bool) -> None:
+        """Enable or disable overlay rendering.
+        
+        Args:
+            enabled: Whether to enable overlay rendering
+        """
+        self.enabled = enabled
+        logger.debug(f"OverlayStep enabled: {enabled}")
+    
+    def set_show_hud(self, show_hud: bool) -> None:
+        """Enable or disable HUD display.
+        
+        Args:
+            show_hud: Whether to show HUD information
+        """
+        self.show_hud = show_hud
+        logger.debug(f"OverlayStep show_hud: {show_hud}")
+    
+    def receive_frame(self,
+                     frame: np.ndarray,
+                     face_mesh_event: Optional[FaceMeshEvent],
+                     calibrated_event: Optional[CalibratedFaceAndGazeEvent]) -> np.ndarray:
+        """Render overlay on frame.
+        
+        Args:
+            frame: Input frame
+            face_mesh_event: Face mesh data (optional)
+            calibrated_event: Calibrated face and gaze data (optional)
+            
+        Returns:
+            Frame with overlay rendered (original frame if disabled)
+        """
+        if not self.enabled or calibrated_event is None:
+            return frame
+        
+        if frame is None:
+            logger.warning("Received None frame in OverlayStep")
+            return None
+        
+        try:
+            # Get face mesh event from calibrated event
+            face_event = calibrated_event.face_mesh_event
+            
+            # Extract head angles from face event
+            head_yaw = face_event.head_yaw if face_event and face_event.head_yaw is not None else 0.0
+            head_pitch = face_event.head_pitch if face_event and face_event.head_pitch is not None else 0.0
+            
+            # Calculate gaze coordinates
+            # Using display geometry from calibrated_event
+            center_x = calibrated_event.origin_x
+            center_y = calibrated_event.origin_y
+            
+            # Calculate gaze position (combined head + calibrated angles)
+            # Coordinate System Convention (from overlay.py):
+            # +yaw moves left, +pitch moves up (negative screen Y)
+            gaze_x = center_x - head_yaw * self.SCALE
+            gaze_y = center_y - head_pitch * self.SCALE
+            
+            # Clamp to frame boundaries
+            frame_height, frame_width = frame.shape[:2]
+            gaze_x = max(self.DOT_RADIUS + 2, min(frame_width - self.DOT_RADIUS - 2, gaze_x))
+            gaze_y = max(self.DOT_RADIUS + 2, min(frame_height - self.DOT_RADIUS - 2, gaze_y))
+            
+            # Draw gaze dot with white ring
+            cv2.circle(frame, (int(gaze_x), int(gaze_y)), self.DOT_RADIUS, self.BLUE, -1)
+            cv2.circle(frame, (int(gaze_x), int(gaze_y)), self.DOT_RADIUS + 2, self.WHITE, 2)
+            
+            # Draw HUD if enabled
+            if self.show_hud:
+                self._draw_hud(frame, face_event, calibrated_event)
+            
+            return frame
+            
+        except Exception as e:
+            logger.warning(f"Error rendering overlay: {e}")
+            return frame
+    
+    def _draw_hud(self,
+                  frame: np.ndarray,
+                  face_event: Optional[FaceMeshEvent],
+                  calibrated_event: CalibratedFaceAndGazeEvent) -> None:
+        """Draw HUD with calibration status and head pose values.
+        
+        Args:
+            frame: Frame to draw on
+            face_event: Face mesh event
+            calibrated_event: Calibrated event with calibration values
+        """
+        frame_height, frame_width = frame.shape[:2]
+        
+        # HUD text
+        has_face = face_event.has_face if face_event else False
+        head_yaw = face_event.head_yaw if face_event and face_event.head_yaw is not None else 0.0
+        head_pitch = face_event.head_pitch if face_event and face_event.head_pitch is not None else 0.0
+        roll = face_event.roll if face_event and face_event.roll is not None else 0.0
+        
+        lines = [
+            f"FACE: {'YES' if has_face else 'NO'}",
+            f"Pitch: {head_pitch:.1f}",
+            f"Yaw: {head_yaw:.1f}",
+            f"Roll: {roll:.1f}",
+        ]
+        
+        # Calculate HUD box dimensions
+        line_height = 20
+        padding = 8
+        max_text_width = max([len(line) * 10 for line in lines])  # Approximate
+        box_width = max_text_width + 2 * padding
+        box_height = len(lines) * line_height + 2 * padding
+        
+        # Position HUD in top-left corner with margin
+        margin = 10
+        box_x = margin
+        box_y = margin
+        
+        # Ensure HUD fits within frame
+        if box_x + box_width > frame_width:
+            box_x = frame_width - box_width - margin
+        if box_y + box_height > frame_height:
+            box_y = frame_height - box_height - margin
+        
+        # Draw HUD background
+        cv2.rectangle(frame, (box_x, box_y), (box_x + box_width, box_y + box_height),
+                     self.HUD_BG, -1)
+        cv2.rectangle(frame, (box_x, box_y), (box_x + box_width, box_y + box_height),
+                     self.BLUE, 1)
+        
+        # Draw text
+        for i, line in enumerate(lines):
+            text_y = box_y + padding + (i + 1) * line_height
+            cv2.putText(frame, line, (box_x + padding, text_y),
+                       cv2.FONT_HERSHEY_SIMPLEX, self.FONT_SCALE, self.WHITE, self.FONT_THICKNESS)
+
+
+class UDPForwardStep:
+    """Final pipeline step: Forward calibrated face and gaze data via UDP to external applications.
+    
+    This step sends the processed and calibrated data to external applications via UDP protocol.
+    It is disabled by default and can be enabled when needed for real-time data streaming.
+    """
+    
+    def __init__(self,
+                 host: str = "127.0.0.1",
+                 port: int = 5005,
+                 enabled: bool = False):
+        """Initialize UDP forward step.
+        
+        Args:
+            host: Target host address (default: "127.0.0.1")
+            port: Target port number (default: 5005)
+            enabled: Whether UDP forwarding is active (default: False)
+        """
+        self.host = host
+        self.port = port
+        self.enabled = enabled
+        self.socket = None
+        
+        # Initialize socket if enabled
+        if self.enabled:
+            self._create_socket()
+        
+        logger.debug(f"UDPForwardStep initialized: host={host}, port={port}, enabled={enabled}")
+    
+    def _create_socket(self) -> None:
+        """Create UDP socket for sending data."""
+        try:
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.socket.setblocking(False)  # Non-blocking mode
+            logger.debug(f"UDP socket created for {self.host}:{self.port}")
+        except Exception as e:
+            logger.warning(f"Failed to create UDP socket: {e}")
+            self.socket = None
+    
+    def _close_socket(self) -> None:
+        """Close UDP socket."""
+        if self.socket is not None:
+            try:
+                self.socket.close()
+                logger.debug("UDP socket closed")
+            except Exception as e:
+                logger.warning(f"Error closing UDP socket: {e}")
+            finally:
+                self.socket = None
+    
+    def set_enabled(self, enabled: bool) -> None:
+        """Enable or disable UDP forwarding.
+        
+        Args:
+            enabled: Whether to enable UDP forwarding
+        """
+        if self.enabled == enabled:
+            return
+        
+        self.enabled = enabled
+        
+        if enabled:
+            self._create_socket()
+        else:
+            self._close_socket()
+        
+        logger.debug(f"UDPForwardStep enabled: {enabled}")
+    
+    def _serialize_event(self, event: CalibratedFaceAndGazeEvent) -> str:
+        """Serialize calibrated event to JSON string.
+        
+        Args:
+            event: Calibrated face and gaze event
+            
+        Returns:
+            JSON string representation of the event
+        """
+        face_event = event.face_mesh_event
+        
+        # Extract head pose values
+        head_yaw = float(face_event.head_yaw) if face_event and face_event.head_yaw is not None else 0.0
+        head_pitch = float(face_event.head_pitch) if face_event and face_event.head_pitch is not None else 0.0
+        roll = float(face_event.roll) if face_event and face_event.roll is not None else 0.0
+        
+        # Calculate calibrated values (head pose + calibration)
+        calibrated_yaw = head_yaw + event.yaw_calibration
+        calibrated_pitch = head_pitch + event.pitch_calibration
+        
+        # Extract data from events
+        data = {
+            'timestamp_ms': face_event.ts if face_event else 0,
+            'has_face': face_event.has_face if face_event else False,
+            'landmark_count': face_event.landmark_count if face_event else 0,
+            'head_yaw': head_yaw,
+            'head_pitch': head_pitch,
+            'roll': roll,
+            'pitch_calibration': float(event.pitch_calibration),
+            'yaw_calibration': float(event.yaw_calibration),
+            'roll_calibration': float(event.roll_calibration),
+            'display_width': event.display_width,
+            'display_height': event.display_height,
+            'origin_x': float(event.origin_x),
+            'origin_y': float(event.origin_y),
+            'calibrated_yaw': calibrated_yaw,
+            'calibrated_pitch': calibrated_pitch,
+        }
+        
+        return json.dumps(data)
+    
+    def receive_frame(self,
+                     frame: np.ndarray,
+                     face_mesh_event: Optional[FaceMeshEvent],
+                     calibrated_event: Optional[CalibratedFaceAndGazeEvent]) -> None:
+        """Forward calibrated data via UDP.
+        
+        Args:
+            frame: Input frame (not used but kept for interface consistency)
+            face_mesh_event: Face mesh data (optional)
+            calibrated_event: Calibrated face and gaze data (optional)
+            
+        Note:
+            This method doesn't return anything - it sends data via UDP.
+        """
+        if not self.enabled:
+            return
+        
+        if calibrated_event is None:
+            logger.debug("Calibrated event is None, skipping UDP forward")
+            return
+        
+        if self.socket is None:
+            logger.warning("UDP socket is None, skipping UDP forward")
+            return
+        
+        try:
+            # Serialize event to JSON
+            message = self._serialize_event(calibrated_event)
+            message_bytes = message.encode('utf-8')
+            
+            # Send via UDP
+            self.socket.sendto(message_bytes, (self.host, self.port))
+            
+            logger.debug(f"UDP message sent to {self.host}:{self.port}: {len(message_bytes)} bytes")
+            
+        except socket.error as e:
+            logger.warning(f"Socket error sending UDP message: {e}")
+        except Exception as e:
+            logger.warning(f"Error sending UDP message: {e}")
+    
+    def __del__(self):
+        """Cleanup when object is destroyed."""
+        self._close_socket()

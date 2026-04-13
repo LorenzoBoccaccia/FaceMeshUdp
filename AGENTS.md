@@ -7,5 +7,8 @@
 - We need solid foundation, not layers of fixes. Make it correct from the origin onward instead of fixing errors in place.
 
 python in .venv
-test with pytest under test folder
-docs under docs folder
+NO tests
+NO docs
+NO inline code comments
+
+Docstring explain what the goal is not how it is achieved

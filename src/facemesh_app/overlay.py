@@ -1,6 +1,11 @@
 """
 Overlay module for FaceMesh application.
 Handles pygame overlay rendering and HUD elements.
+
+Coordinate System Convention:
+- All yaw angles use left-positive convention
+- All pitch angles use up-positive convention
+- Screen mapping: +yaw moves left, +pitch moves up (negative screen Y)
 """
 
 import ctypes
@@ -265,8 +270,8 @@ class OverlayManager:
         """Update calibration state based on elapsed time.
         
         Coordinate System Convention:
-        - All eye gaze angles use right-positive, up-positive convention
-        - calibrated_combined_eye_gaze_yaw: Positive = looking RIGHT, negative = looking LEFT
+        - All eye gaze angles use left-positive, up-positive convention
+        - calibrated_combined_eye_gaze_yaw: Positive = looking LEFT, negative = looking RIGHT
         - calibrated_combined_eye_gaze_pitch: Positive = looking UP, negative = looking DOWN
         
         Manages phase transitions through: blink_pre -> countdown -> sampling -> blink_post.
@@ -274,11 +279,11 @@ class OverlayManager:
         
         Args:
             evt: Face tracking event dict containing eye gaze data with keys:
-                - calibrated_combined_eye_gaze_yaw: Combined eye yaw angle (right-positive)
+                - calibrated_combined_eye_gaze_yaw: Combined eye yaw angle (left-positive)
                 - calibrated_combined_eye_gaze_pitch: Combined eye pitch angle (up-positive)
-                - calibrated_left_eye_gaze_yaw: Left eye yaw angle (right-positive)
+                - calibrated_left_eye_gaze_yaw: Left eye yaw angle (left-positive)
                 - calibrated_left_eye_gaze_pitch: Left eye pitch angle (up-positive)
-                - calibrated_right_eye_gaze_yaw: Right eye yaw angle (right-positive)
+                - calibrated_right_eye_gaze_yaw: Right eye yaw angle (left-positive)
                 - calibrated_right_eye_gaze_pitch: Right eye pitch angle (up-positive)
             
         Returns:
@@ -425,44 +430,73 @@ class OverlayManager:
             self.screen.blit(text_img, text_rect)
     
     def render_gaze_dot(self, evt: Optional[Dict]):
-        """Render blue gaze dot showing calibrated eye gaze position in normal mode.
+        """Render three gaze dots showing different angle combinations.
         
-        Coordinate System Convention:
-        - Gaze yaw: Positive values indicate looking RIGHT, negative values indicate looking LEFT
-        - Gaze pitch: Positive values indicate looking UP, negative values indicate looking DOWN
-        - Screen mapping: +yaw moves right from center, +pitch moves up from center
+        Coordinate System Convention (left-positive, up-positive):
+        - Head yaw/pitch: Positive = turning LEFT / tilting UP
+        - Eye yaw/pitch: Positive = looking LEFT / looking UP
+        - Screen mapping: +yaw moves left, +pitch moves up (negative screen Y)
         
-        Converts calibrated eye gaze angles to screen coordinates and draws a blue circle
-        with white ring at the computed gaze position.
+        Three dots:
+        - Blue: Combined head + eye angles (total gaze)
+        - Red: Head angles only
+        - Green: Eye angles only
         
         Args:
-            evt: Face tracking event dict containing calibrated gaze data with keys:
-                - calibrated_combined_eye_gaze_yaw: Horizontal gaze angle in degrees (right-positive)
-                - calibrated_combined_eye_gaze_pitch: Vertical gaze angle in degrees (up-positive)
+            evt: Face tracking event dict containing:
+                - head_yaw, head_pitch: Head pose angles (degrees)
+                - calibrated_combined_eye_gaze_yaw: Eye gaze horizontal (degrees)
+                - calibrated_combined_eye_gaze_pitch: Eye gaze vertical (degrees)
         """
         if not evt:
             return
         
-        # Extract calibrated gaze angles
-        gaze_yaw = evt.get("calibrated_combined_eye_gaze_yaw")
-        gaze_pitch = evt.get("calibrated_combined_eye_gaze_pitch")
+        # Extract head angles
+        head_yaw = evt.get("head_yaw")
+        head_pitch = evt.get("head_pitch")
         
-        # Only render if calibrated gaze data is available
-        if gaze_yaw is None or gaze_pitch is None:
+        # Extract eye gaze angles
+        eye_yaw = evt.get("calibrated_combined_eye_gaze_yaw")
+        eye_pitch = evt.get("calibrated_combined_eye_gaze_pitch")
+        
+        # Need both head and eye for rendering
+        if head_yaw is None or head_pitch is None:
+            return
+        if eye_yaw is None or eye_pitch is None:
             return
         
-        # Convert calibrated gaze angles to screen coordinates
         # Using 14.0 pixels per degree scaling factor
-        screen_x = self.width / 2 + gaze_yaw * 14.0
-        screen_y = self.height / 2 - gaze_pitch * 14.0  # Negative because screen Y increases downward
+        SCALE = 14.0
         
-        # Clamp to screen bounds
-        screen_x = clamp(screen_x, 0, self.width)
-        screen_y = clamp(screen_y, 0, self.height)
+        # RED DOT: Head angles only
+        red_x = self.width / 2 - head_yaw * SCALE
+        red_y = self.height / 2 - head_pitch * SCALE
+        red_x = clamp(red_x, 0, self.width)
+        red_y = clamp(red_y, 0, self.height)
         
-        # Draw blue gaze dot with white ring
-        pygame.draw.circle(self.screen, BLUE, (int(screen_x), int(screen_y)), DOT_RADIUS)
-        pygame.draw.circle(self.screen, WHITE, (int(screen_x), int(screen_y)), DOT_RADIUS + 2, 2)
+        # GREEN DOT: Eye angles only
+        green_x = self.width / 2 - eye_yaw * SCALE
+        green_y = self.height / 2 - eye_pitch * SCALE
+        green_x = clamp(green_x, 0, self.width)
+        green_y = clamp(green_y, 0, self.height)
+        
+        # BLUE DOT: Combined head + eye angles
+        blue_x = self.width / 2 - (head_yaw + eye_yaw) * SCALE
+        blue_y = self.height / 2 - (head_pitch + eye_pitch) * SCALE
+        blue_x = clamp(blue_x, 0, self.width)
+        blue_y = clamp(blue_y, 0, self.height)
+        
+        # Draw red dot (head only) with white ring
+        pygame.draw.circle(self.screen, RED, (int(red_x), int(red_y)), DOT_RADIUS)
+        pygame.draw.circle(self.screen, WHITE, (int(red_x), int(red_y)), DOT_RADIUS + 2, 2)
+        
+        # Draw green dot (eye only) with white ring
+        pygame.draw.circle(self.screen, GREEN, (int(green_x), int(green_y)), DOT_RADIUS)
+        pygame.draw.circle(self.screen, WHITE, (int(green_x), int(green_y)), DOT_RADIUS + 2, 2)
+        
+        # Draw blue dot (head + eye) with white ring (on top)
+        pygame.draw.circle(self.screen, BLUE, (int(blue_x), int(blue_y)), DOT_RADIUS)
+        pygame.draw.circle(self.screen, WHITE, (int(blue_x), int(blue_y)), DOT_RADIUS + 2, 2)
     
     def _make_calib_seq(self, width: float, height: float) -> List[Dict]:
         """Generate 9-point calibration sequence positions.

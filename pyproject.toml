@@ -33,3 +33,8 @@ where = ["src"]
 [tool.taskipy.tasks]
 run = "python -m facemesh_app.main"
 build-exe = ".\\.venv\\Scripts\\python -m PyInstaller --noconfirm --onefile --name facemesh src/facemesh_app/main.py"
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+python_files = ["validation_*.py", "test_*.py"]
+python_functions = ["validation_*"]

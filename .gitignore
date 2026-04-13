@@ -6,7 +6,7 @@ __pycache__/
 *.pyc
 captures/
 face_landmarker.task
-calibration.json
+calibration*.json
 *.spec
 
 # Byte-compiled / optimized / DLL files

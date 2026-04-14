@@ -1,4 +1,3 @@
-# main.py
 #!/usr/bin/env python3
 """
 FaceMesh Data Capture Application
@@ -7,17 +6,14 @@ Main entry point for raw face mesh data capture.
 
 import argparse
 import os
-import urllib.request
-from pathlib import Path
 
 import cv2
-import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
 from .facemesh_dao import load_calibration
 from .camera_reader import CameraReader
-from .frame_dispatcher import FrameDispatcher
+from .frame_dispatcher import FrameDispatcher, ensure_model, MODEL_PATH
 from .overlay import OverlayManager, get_display_geo
 from .pipeline_steps import (
     FaceMeshStep,
@@ -32,10 +28,10 @@ from .state_machine import StateMachine
 
 def _backend_string_to_int(backend_str: str) -> int:
     """Convert backend string to cv2 CAP_* constant.
-    
+
     Args:
         backend_str: Backend string ('auto', 'msmf', 'dshow', 'any')
-    
+
     Returns:
         Corresponding cv2 CAP_* constant (defaults to CAP_ANY)
     """
@@ -48,20 +44,8 @@ def _backend_string_to_int(backend_str: str) -> int:
     return backend_map.get(backend_str.lower(), cv2.CAP_ANY)
 
 
-MODEL_PATH = Path("face_landmarker.task")
-MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
-
-
-def ensure_model():
-    """Ensure FaceMesh model file exists, download if missing."""
-    if MODEL_PATH.exists():
-        return
-    print(f"Downloading FaceMesh model from {MODEL_URL}", flush=True)
-    urllib.request.urlretrieve(MODEL_URL, str(MODEL_PATH))
-    print("FaceMesh model downloaded successfully", flush=True)
-
-
 def parse_args():
+    """Available CLI arguments for the FaceMesh capture application."""
     parser = argparse.ArgumentParser(description="FaceMesh data capture app")
 
     parser.add_argument("--overlay", action=argparse.BooleanOptionalAction, default=True, help="Show overlay window")
@@ -124,10 +108,8 @@ def parse_args():
 
 
 def main():
-    # Argument parsing section
     args = parse_args()
 
-    # Load calibration if applicable
     calibration = None
     if not args.force_recalibrate and not args.calibrate and not args.calibration:
         calibration, _ = load_calibration(args.calibration_profile)
@@ -144,17 +126,11 @@ def main():
         else:
             print("No existing calibration found. Running in uncalibrated mode.", flush=True)
 
-    # Create StateMachine - foundational component for pipeline state management
-    # This will be injected into FrameDispatcherV2 in future refactoring
     state_machine = StateMachine()
 
-    # Get display geometry - needed for CalibrationAdapterStep configuration
-    # The display geometry provides screen dimensions for coordinate transformations
     display = get_display_geo()
 
-    # FaceMeshStep creation - first pipeline step that processes frames to detect facial landmarks
-    # This will be injected into FrameDispatcherV2 in future refactoring
-    ensure_model()  # Download model if needed
+    ensure_model()
     base = python.BaseOptions(model_asset_path=str(MODEL_PATH))
     opts = vision.FaceLandmarkerOptions(
         base_options=base,
@@ -166,12 +142,9 @@ def main():
     face_landmarker = vision.FaceLandmarker.create_from_options(opts)
     face_mesh_step = FaceMeshStep(face_landmarker)
 
-    # CalibrationAdapterStep creation - second pipeline step that applies calibration transformations
-    # This will be injected into FrameDispatcherV2 in future refactoring
-    # Extract calibration values from calibration matrix if available, otherwise use defaults
     pitch_calib = calibration.center_pitch if calibration else 0.0
     yaw_calib = calibration.center_yaw if calibration else 0.0
-    roll_calib = 0.0  # Roll calibration not currently stored in calibration matrix
+    roll_calib = 0.0
     calibration_adapter_step = CalibrationAdapterStep(
         pitch_calibration=pitch_calib,
         yaw_calibration=yaw_calib,
@@ -182,32 +155,18 @@ def main():
         origin_y=float(display['height']) / 2.0
     )
 
-    # CalibrationControllerStep creation - manages calibration workflow and collects calibration samples
-    # This will be injected into FrameDispatcherV2 in future refactoring
-    # Requires face_landmarker for face detection and min_samples for minimum samples per calibration point
     calibration_samples = getattr(args, 'calibration_samples', 5)
     calibration_controller_step = CalibrationControllerStep(
         face_landmarker=face_landmarker,
         min_samples=calibration_samples
     )
 
-    # CaptureStep creation - handles live preview display and frame counting
-    # This will be injected into FrameDispatcherV2 in future refactoring
-    # Uses args.capture flag to determine if capture/preview is enabled
     capture_step = CaptureStep(enabled=args.capture)
 
-    # OverlayStep creation - renders visual overlays on the display
-    # This will be injected into FrameDispatcherV2 in future refactoring
-    # Uses args.overlay flag to determine if overlay rendering is enabled
     overlay_step = OverlayStep(enabled=args.overlay, show_hud=True)
 
-    # UDPForwardStep creation - forwards processed data to UDP server
-    # This will be injected into FrameDispatcherV2 in future refactoring
-    # UDP forwarding is disabled by default and can be enabled when needed for real-time data streaming
     udp_forward_step = UDPForwardStep(host=args.udp_host, port=args.udp_port)
 
-    # OverlayManager creation - manages pygame overlay rendering and interaction
-    # This will be injected into FrameDispatcher in the constructor call
     overlay_manager = OverlayManager(
         display=display,
         capture_enabled=args.capture,
@@ -215,8 +174,6 @@ def main():
         calibration_mode=args.calibrate or args.calibration
     )
 
-    # Component instantiation - inject all pipeline steps into FrameDispatcher
-    # This completes the dependency injection pattern, giving main.py full control
     frame_dispatcher = FrameDispatcher(
         args,
         calibration=calibration,
@@ -238,31 +195,25 @@ def main():
         args.camera_height,
         args.camera_fps
     )
-    
+
     try:
-        # Start the dispatcher worker
         frame_dispatcher.start()
-        
-        # Start camera frame capture
         camera_reader.startReceiving()
-        
-        # Run appropriate workflow
+
         if args.calibrate or args.calibration:
             print("Running calibration workflow...", flush=True)
             frame_dispatcher.run_calibration_workflow()
         else:
-            # Run capture loop for overlay/capture modes
             mode = "capture" if args.capture else "overlay"
             print(f"Running in {mode} mode...", flush=True)
-            frame_dispatcher.run_capture_loop(duration=args.duration)
-            
+            frame_dispatcher.run_capture_loop(run_duration=args.duration)
+
     except KeyboardInterrupt:
         print("\nInterrupted by user", flush=True)
     except Exception as e:
         print(f"Error: {e}", flush=True)
         raise
     finally:
-        # Cleanup
         print("Shutting down...", flush=True)
         camera_reader.stopReceiving()
         frame_dispatcher.stop()

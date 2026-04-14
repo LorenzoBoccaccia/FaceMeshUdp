@@ -1,8 +1,0 @@
-mediapipe>=0.10.14
-opencv-python>=4.10.0.84
-numpy>=1.26.0
-pygame>=2.6.0
-
-[dev]
-pyinstaller>=6.11.0
-taskipy>=1.14.0

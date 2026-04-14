@@ -218,8 +218,3 @@ marimo/_lsp/
 __marimo__/
 harmonization_data/
 pitch_correlation/
-docs/frame_dispatcher_constructor_injection_changeset.md
-docs/frame_flow_integration_summary.md
-docs/pipeline_refactoring_design.md
-docs/pipeline_refactoring_tasks.md
-docs/refactoring_plan.md

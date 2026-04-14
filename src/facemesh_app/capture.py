@@ -460,17 +460,16 @@ def build_camera_capture_marked_image(
         cv2.circle(img, right_center, 5, WHITE, -1, cv2.LINE_AA)
         cv2.circle(img, right_center, 3, MAGENTA, -1, cv2.LINE_AA)
 
+    l_gaze_yaw = None
+    l_gaze_pitch = None
+    r_gaze_yaw = None
+    r_gaze_pitch = None
     if isinstance(snap_evt, FaceMeshEvent):
         eyes = snap_evt.eyes_dict()
         l_gaze_yaw = eyes.get("leftEyeGazeYaw")
         l_gaze_pitch = eyes.get("leftEyeGazePitch")
         r_gaze_yaw = eyes.get("rightEyeGazeYaw")
         r_gaze_pitch = eyes.get("rightEyeGazePitch")
-        l_n = None
-        r_n = None
-        l_e = None
-        r_e = None
-        gaze = None
     elif isinstance(snap_evt, dict):
         eyes = snap_evt.get("eyes") or {}
         if isinstance(eyes, dict):
@@ -478,40 +477,6 @@ def build_camera_capture_marked_image(
             l_gaze_pitch = eyes.get("leftEyeGazePitch")
             r_gaze_yaw = eyes.get("rightEyeGazeYaw")
             r_gaze_pitch = eyes.get("rightEyeGazePitch")
-            l_n = None
-            r_n = None
-            l_e = None
-            r_e = None
-            gaze = None
-        else:
-            l_gaze_yaw = None
-            l_gaze_pitch = None
-            r_gaze_yaw = None
-            r_gaze_pitch = None
-            l_n = None
-            r_n = None
-            l_e = None
-            r_e = None
-            gaze = None
-    else:
-        l_gaze_yaw = None
-        l_gaze_pitch = None
-        r_gaze_yaw = None
-        r_gaze_pitch = None
-        l_n = None
-        r_n = None
-        l_e = None
-        r_e = None
-        gaze = None
-
-
-
-    _draw_fitted_ellipse(img, l_e, ORANGE)
-    _draw_fitted_ellipse(img, r_e, CYAN)
-    if left_center is not None:
-        _draw_normal_arrow(img, left_center, l_n, ORANGE, max(18, int(min(fw, fh) * 0.06)))
-    if right_center is not None:
-        _draw_normal_arrow(img, right_center, r_n, CYAN, max(18, int(min(fw, fh) * 0.06)))
 
     # Get nose position for average gaze vector origin.
     nose = _lm_to_px(landmarks[1], fw, fh, mirror_x=mirror_view) if len(landmarks) > 1 else (fw // 2, fh // 2)
@@ -578,11 +543,6 @@ def build_camera_capture_marked_image(
             snap_evt.get("headPitch", snap_evt.get("pitch")),
             snap_evt.get("roll"),
         )
-    if isinstance(gaze, dict):
-        g_n = gaze.get("normal")
-        if isinstance(g_n, (list, tuple)) and len(g_n) >= 3:
-            _draw_normal_arrow(img, nose, g_n, YELLOW, max(26, int(min(fw, fh) * 0.10)))
-
     # Click marker mapped from overlay-space to frame-space.
     cx = int(clamp(round((float(click_pos[0]) / max(1.0, float(overlay_w))) * fw), 0, fw - 1))
     cy = int(clamp(round((float(click_pos[1]) / max(1.0, float(overlay_h))) * fh), 0, fh - 1))
@@ -613,12 +573,6 @@ def save_test_capture(display: Dict, w: float, h: float, click_pos: Tuple[float,
     snap_evt = snap.get("evt")
     snap_frame = snap.get("frame")
     snap_landmarks = snap.get("landmarks")
-
-    # Ellipse estimator runs in mirrored view-space to match capture rendering.
-
-    if snap_frame is not None and isinstance(snap_landmarks, list) and snap_landmarks:
-        mirrored_frame = cv2.flip(snap_frame, 1)
-        
 
     if isinstance(snap_evt, FaceMeshEvent):
         event_dump = snap_evt.to_capture_dump()

@@ -461,24 +461,11 @@ class FrameDispatcher:
                     last_live_seq = snap_seq
                     snap_frame = snap.get("frame")
                     snap_landmarks = snap.get("landmarks")
-                    eye_ellipses = None
-
-                    estimate_eye_ellipses_fn = globals().get("estimate_eye_ellipses")
-                    if (
-                        estimate_eye_ellipses_fn is not None
-                        and snap_frame is not None
-                        and isinstance(snap_landmarks, list)
-                        and snap_landmarks
-                    ):
-                        mirrored_frame = cv2.flip(snap_frame, 1)
-                        eye_ellipses = estimate_eye_ellipses_fn(mirrored_frame, snap_landmarks, mirror_x=True)
-
                     live_img, _ = build_camera_capture_marked_image(
                         snap,
                         overlay_w=float(w),
                         overlay_h=float(h),
                         click_pos=(0.0, 0.0),
-                        eye_ellipses=eye_ellipses,
                         draw_click=False,
                     )
                     if live_img is not None:
@@ -727,7 +714,7 @@ class FrameDispatcherV2:
         if calibration is not None:
             pitch_calibration = calibration.center_pitch
             yaw_calibration = calibration.center_yaw
-            roll_calibration = calibration.center_roll
+            roll_calibration = 0.0
         
         self.calibration_adapter_step = calibration_adapter_step or CalibrationAdapterStep(
             pitch_calibration=pitch_calibration,

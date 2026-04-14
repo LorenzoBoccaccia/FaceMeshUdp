@@ -9,6 +9,7 @@ Calibration is angle-based:
 """
 
 import json
+import logging
 import math
 import time
 from dataclasses import dataclass
@@ -16,6 +17,8 @@ from pathlib import Path
 from typing import Any, Optional, Dict, List, Tuple
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 AVERAGE_IPD_MM = 60.0
@@ -59,7 +62,7 @@ RIGHT_EYE_KEY_IDXS = (
 )
 
 
-@dataclass
+@dataclass(frozen=True)
 class CalibrationMatrix:
     # Eye-in-head zero at center, in degrees.
     center_yaw: float = 0.0
@@ -83,7 +86,7 @@ class CalibrationMatrix:
     timestamp_ms: int = 0
 
 
-@dataclass
+@dataclass(frozen=True)
 class CalibrationPoint:
     name: str
     screen_x: float
@@ -105,7 +108,7 @@ class CalibrationPoint:
 def safe_float(v, fallback=0.0):
     try:
         f = float(v)
-    except Exception:
+    except (ValueError, TypeError):
         return fallback
     return f if math.isfinite(f) else fallback
 
@@ -142,7 +145,9 @@ def compute_calibration_matrix(points: List[CalibrationPoint]) -> CalibrationMat
     if center_point is None:
         raise ValueError("Calibration points must include a center point named 'C'")
 
-    center_zeta = _positive_or(getattr(center_point, "zeta", DEFAULT_CENTER_ZETA), DEFAULT_CENTER_ZETA)
+    center_zeta = _positive_or(
+        getattr(center_point, "zeta", DEFAULT_CENTER_ZETA), DEFAULT_CENTER_ZETA
+    )
 
     A_rows: List[List[float]] = []
     b_yaw: List[float] = []
@@ -153,7 +158,9 @@ def compute_calibration_matrix(points: List[CalibrationPoint]) -> CalibrationMat
             continue
 
         eye_dyaw = safe_float(point.raw_eye_yaw) - safe_float(center_point.raw_eye_yaw)
-        eye_dpitch = safe_float(point.raw_eye_pitch) - safe_float(center_point.raw_eye_pitch)
+        eye_dpitch = safe_float(point.raw_eye_pitch) - safe_float(
+            center_point.raw_eye_pitch
+        )
 
         if abs(eye_dyaw) <= 1e-9 and abs(eye_dpitch) <= 1e-9:
             continue
@@ -169,8 +176,12 @@ def compute_calibration_matrix(points: List[CalibrationPoint]) -> CalibrationMat
             zeta,
         )
 
-        face_delta_yaw = safe_float(getattr(point, "head_yaw", 0.0)) - safe_float(getattr(center_point, "head_yaw", 0.0))
-        face_delta_pitch = safe_float(getattr(point, "head_pitch", 0.0)) - safe_float(getattr(center_point, "head_pitch", 0.0))
+        face_delta_yaw = safe_float(getattr(point, "head_yaw", 0.0)) - safe_float(
+            getattr(center_point, "head_yaw", 0.0)
+        )
+        face_delta_pitch = safe_float(getattr(point, "head_pitch", 0.0)) - safe_float(
+            getattr(center_point, "head_pitch", 0.0)
+        )
 
         # Eye component only: total monitor-plane angle minus face contribution.
         target_eye_yaw = target_total_yaw - face_delta_yaw
@@ -198,8 +209,10 @@ def compute_calibration_matrix(points: List[CalibrationPoint]) -> CalibrationMat
             matrix_yaw_pitch = float(coeffs_yaw[1])
             matrix_pitch_yaw = float(coeffs_pitch[0])
             matrix_pitch_pitch = float(coeffs_pitch[1])
-        except Exception:
-            pass
+        except (np.linalg.LinAlgError, ValueError) as e:
+            logger.warning(
+                f"Calibration lstsq solve failed, using identity matrix: {e}"
+            )
 
     total_sample_count = sum(int(p.sample_count) for p in points)
 
@@ -233,9 +246,15 @@ def _profile_token(raw_profile: str) -> str:
     return sanitized if sanitized else "default"
 
 
-def save_calibration(calib: CalibrationMatrix, points: List[CalibrationPoint], profile: str = "") -> Path:
+def save_calibration(
+    calib: CalibrationMatrix, points: List[CalibrationPoint], profile: str = ""
+) -> Path:
     profile_token = _profile_token(profile)
-    filename = "calibration.json" if profile_token == "default" else f"calibration-{profile_token}.json"
+    filename = (
+        "calibration.json"
+        if profile_token == "default"
+        else f"calibration-{profile_token}.json"
+    )
 
     payload = {
         "timestamp": int(time.time() * 1000),
@@ -280,9 +299,15 @@ def save_calibration(calib: CalibrationMatrix, points: List[CalibrationPoint], p
     return file_path
 
 
-def load_calibration(profile: str = "") -> Tuple[CalibrationMatrix, List[CalibrationPoint]]:
+def load_calibration(
+    profile: str = "",
+) -> Tuple[CalibrationMatrix, List[CalibrationPoint]]:
     profile_token = _profile_token(profile)
-    filename = "calibration.json" if profile_token == "default" else f"calibration-{profile_token}.json"
+    filename = (
+        "calibration.json"
+        if profile_token == "default"
+        else f"calibration-{profile_token}.json"
+    )
     file_path = Path(filename)
 
     empty = CalibrationMatrix(
@@ -305,12 +330,17 @@ def load_calibration(profile: str = "") -> Tuple[CalibrationMatrix, List[Calibra
     try:
         with file_path.open("r", encoding="utf-8") as f:
             data = json.load(f)
-    except (json.JSONDecodeError, IOError):
+    except (json.JSONDecodeError, IOError) as e:
+        logger.warning(f"Failed to load calibration from {filename}: {e}")
         return empty, []
 
     calib_data = data.get("calibration", {})
     model_version = int(safe_float(calib_data.get("modelVersion", 1), 1))
     if model_version != CALIBRATION_MODEL_VERSION:
+        logger.info(
+            f"Calibration file {filename} has model version {model_version}, "
+            f"expected {CALIBRATION_MODEL_VERSION}. Discarding."
+        )
         return empty, []
 
     calib = CalibrationMatrix(
@@ -318,7 +348,9 @@ def load_calibration(profile: str = "") -> Tuple[CalibrationMatrix, List[Calibra
         center_pitch=safe_float(calib_data.get("centerPitch", 0.0)),
         face_center_yaw=safe_float(calib_data.get("faceCenterYaw", 0.0)),
         face_center_pitch=safe_float(calib_data.get("faceCenterPitch", 0.0)),
-        center_zeta=_positive_or(calib_data.get("centerZeta", DEFAULT_CENTER_ZETA), DEFAULT_CENTER_ZETA),
+        center_zeta=_positive_or(
+            calib_data.get("centerZeta", DEFAULT_CENTER_ZETA), DEFAULT_CENTER_ZETA
+        ),
         matrix_yaw_yaw=safe_float(calib_data.get("matrixYawYaw", 1.0)),
         matrix_yaw_pitch=safe_float(calib_data.get("matrixYawPitch", 0.0)),
         matrix_pitch_yaw=safe_float(calib_data.get("matrixPitchYaw", 0.0)),
@@ -343,7 +375,9 @@ def load_calibration(profile: str = "") -> Tuple[CalibrationMatrix, List[Calibra
                 sample_count=int(point_data.get("sampleCount", 0)),
                 head_yaw=safe_float(point_data.get("headYaw", 0.0)),
                 head_pitch=safe_float(point_data.get("headPitch", 0.0)),
-                zeta=_positive_or(point_data.get("zeta", DEFAULT_CENTER_ZETA), DEFAULT_CENTER_ZETA),
+                zeta=_positive_or(
+                    point_data.get("zeta", DEFAULT_CENTER_ZETA), DEFAULT_CENTER_ZETA
+                ),
             )
         )
 
@@ -375,7 +409,13 @@ class FaceMeshEvent:
         ts: Optional[int] = None,
         calibration: Optional["CalibrationMatrix"] = None,
     ):
-        return cls(result, face_index=face_index, ts=ts, event_type="mesh", calibration=calibration)
+        return cls(
+            result,
+            face_index=face_index,
+            ts=ts,
+            event_type="mesh",
+            calibration=calibration,
+        )
 
     def _face_item(self, attr_name: str):
         if self.result is None:
@@ -416,9 +456,7 @@ class FaceMeshEvent:
         dy = a[1] - b[1]
         return math.sqrt(dx * dx + dy * dy)
 
-    @staticmethod
-    def _transform_flat_no_fallback(self_or_maybe_self=None) -> Optional[List[float]]:
-        self = self_or_maybe_self
+    def _transform_flat_no_fallback(self) -> Optional[List[float]]:
         m = self.transform_matrix
         if m is None:
             return None
@@ -450,7 +488,7 @@ class FaceMeshEvent:
         return values or None
 
     def _transform_m44(self) -> Optional[List[List[float]]]:
-        flat = self._transform_flat_no_fallback(self)
+        flat = self._transform_flat_no_fallback()
         if flat is None or len(flat) < 16:
             return None
         return [flat[0:4], flat[4:8], flat[8:12], flat[12:16]]
@@ -463,7 +501,7 @@ class FaceMeshEvent:
         try:
             return len(lms) > 0
         except Exception:
-            return True
+            return False
 
     @property
     def head_yaw(self) -> Optional[float]:
@@ -490,7 +528,7 @@ class FaceMeshEvent:
         m44 = self._transform_m44()
         if m44 is not None:
             return m44[0][3]
-        flat = self._transform_flat_no_fallback(self)
+        flat = self._transform_flat_no_fallback()
         if flat is not None and len(flat) > 3:
             return flat[3]
         return None
@@ -500,7 +538,7 @@ class FaceMeshEvent:
         m44 = self._transform_m44()
         if m44 is not None:
             return m44[1][3]
-        flat = self._transform_flat_no_fallback(self)
+        flat = self._transform_flat_no_fallback()
         if flat is not None and len(flat) > 7:
             return flat[7]
         return None
@@ -510,7 +548,7 @@ class FaceMeshEvent:
         m44 = self._transform_m44()
         if m44 is not None:
             return m44[2][3]
-        flat = self._transform_flat_no_fallback(self)
+        flat = self._transform_flat_no_fallback()
         if flat is not None and len(flat) > 11:
             return flat[11]
         return None
@@ -548,7 +586,7 @@ class FaceMeshEvent:
         m44 = self._transform_m44()
         if m44 is not None:
             return math.degrees(math.atan2(m44[0][1], m44[0][0]))
-        flat = self._transform_flat_no_fallback(self)
+        flat = self._transform_flat_no_fallback()
         if flat is not None and len(flat) > 1:
             return math.degrees(math.atan2(flat[1], flat[0]))
         return None
@@ -572,7 +610,11 @@ class FaceMeshEvent:
         if lm is None:
             return None
         if hasattr(lm, "x") and hasattr(lm, "y"):
-            return [safe_float(lm.x), safe_float(lm.y), safe_float(getattr(lm, "z", 0.0))]
+            return [
+                safe_float(lm.x),
+                safe_float(lm.y),
+                safe_float(getattr(lm, "z", 0.0)),
+            ]
         if isinstance(lm, (list, tuple)) and len(lm) >= 3:
             return [safe_float(lm[0]), safe_float(lm[1]), safe_float(lm[2])]
         return None
@@ -645,7 +687,13 @@ class FaceMeshEvent:
         upper: Optional[List[float]],
         lower: Optional[List[float]],
     ) -> Optional[tuple[float, float]]:
-        if iris_center is None or inner is None or outer is None or upper is None or lower is None:
+        if (
+            iris_center is None
+            or inner is None
+            or outer is None
+            or upper is None
+            or lower is None
+        ):
             return None
 
         hx = outer[0] - inner[0]
@@ -678,14 +726,19 @@ class FaceMeshEvent:
 
         horizontal_coord = (dx * hux + dy * huy) / (eye_width * 0.5)
         vertical_coord = -(dx * vux + dy * vuy) / (lid_aperture * 0.5)
-        if abs(horizontal_coord) > GAZE_COORD_MAX_VALID or abs(vertical_coord) > GAZE_COORD_MAX_VALID:
+        if (
+            abs(horizontal_coord) > GAZE_COORD_MAX_VALID
+            or abs(vertical_coord) > GAZE_COORD_MAX_VALID
+        ):
             return None
 
         horizontal_coord = clamp(horizontal_coord, -1.0, 1.0)
         vertical_coord = clamp(vertical_coord, -1.0, 1.0)
 
         yaw = horizontal_coord * HORIZONTAL_MAX_DEG
-        pitch = vertical_coord * (UPWARD_MAX_DEG if vertical_coord >= 0.0 else DOWNWARD_MAX_DEG)
+        pitch = vertical_coord * (
+            UPWARD_MAX_DEG if vertical_coord >= 0.0 else DOWNWARD_MAX_DEG
+        )
 
         return yaw, pitch
 
@@ -749,18 +802,29 @@ class FaceMeshEvent:
             return None
         return (left_pitch + right_pitch) / 2.0
 
-    def _apply_calibration(self, raw_yaw: float, raw_pitch: float, calib: CalibrationMatrix) -> tuple[float, float]:
+    def _apply_calibration(
+        self, raw_yaw: float, raw_pitch: float, calib: CalibrationMatrix
+    ) -> tuple[float, float]:
         if calib.sample_count <= 0:
             return raw_yaw, raw_pitch
 
         eye_dyaw = raw_yaw - calib.center_yaw
         eye_dpitch = raw_pitch - calib.center_pitch
 
-        eye_plane_yaw = calib.matrix_yaw_yaw * eye_dyaw + calib.matrix_yaw_pitch * eye_dpitch
-        eye_plane_pitch = calib.matrix_pitch_yaw * eye_dyaw + calib.matrix_pitch_pitch * eye_dpitch
+        eye_plane_yaw = (
+            calib.matrix_yaw_yaw * eye_dyaw + calib.matrix_yaw_pitch * eye_dpitch
+        )
+        eye_plane_pitch = (
+            calib.matrix_pitch_yaw * eye_dyaw + calib.matrix_pitch_pitch * eye_dpitch
+        )
 
-        face_delta_yaw = safe_float(self.head_yaw, calib.face_center_yaw) - calib.face_center_yaw
-        face_delta_pitch = safe_float(self.head_pitch, calib.face_center_pitch) - calib.face_center_pitch
+        face_delta_yaw = (
+            safe_float(self.head_yaw, calib.face_center_yaw) - calib.face_center_yaw
+        )
+        face_delta_pitch = (
+            safe_float(self.head_pitch, calib.face_center_pitch)
+            - calib.face_center_pitch
+        )
 
         return face_delta_yaw + eye_plane_yaw, face_delta_pitch + eye_plane_pitch
 
@@ -770,7 +834,9 @@ class FaceMeshEvent:
         if raw_yaw is None:
             return None
         raw_pitch = self.left_eye_gaze_pitch or 0.0
-        calib = self.calibration if self.calibration is not None else CalibrationMatrix()
+        calib = (
+            self.calibration if self.calibration is not None else CalibrationMatrix()
+        )
         calibrated_yaw, _ = self._apply_calibration(raw_yaw, raw_pitch, calib)
         return calibrated_yaw
 
@@ -780,7 +846,9 @@ class FaceMeshEvent:
         if raw_yaw is None:
             return None
         raw_pitch = self.right_eye_gaze_pitch or 0.0
-        calib = self.calibration if self.calibration is not None else CalibrationMatrix()
+        calib = (
+            self.calibration if self.calibration is not None else CalibrationMatrix()
+        )
         calibrated_yaw, _ = self._apply_calibration(raw_yaw, raw_pitch, calib)
         return calibrated_yaw
 
@@ -790,7 +858,9 @@ class FaceMeshEvent:
         raw_pitch = self.left_eye_gaze_pitch
         if raw_pitch is None:
             return None
-        calib = self.calibration if self.calibration is not None else CalibrationMatrix()
+        calib = (
+            self.calibration if self.calibration is not None else CalibrationMatrix()
+        )
         _, calibrated_pitch = self._apply_calibration(raw_yaw, raw_pitch, calib)
         return calibrated_pitch
 
@@ -800,7 +870,9 @@ class FaceMeshEvent:
         raw_pitch = self.right_eye_gaze_pitch
         if raw_pitch is None:
             return None
-        calib = self.calibration if self.calibration is not None else CalibrationMatrix()
+        calib = (
+            self.calibration if self.calibration is not None else CalibrationMatrix()
+        )
         _, calibrated_pitch = self._apply_calibration(raw_yaw, raw_pitch, calib)
         return calibrated_pitch
 
@@ -986,28 +1058,29 @@ class FaceMeshEvent:
         return self.to_overlay_dict()
 
 
-@dataclass
+@dataclass(frozen=True)
 class CalibratedFaceAndGazeEvent:
     """Combined event that merges face mesh data with calibration and display geometry.
-    
+
     This event combines:
     - Face mesh data (from FaceMeshEvent)
     - Calibration data (pitch/yaw/roll calibration values)
     - Display geometry (screen dimensions, origin offset)
-    
+
     This is the primary data structure for the refactored gaze pipeline,
     providing all necessary data in a single, well-typed object.
     """
+
     # Face mesh data (from FaceMeshEvent)
     face_mesh_event: FaceMeshEvent
-    
+
     # Calibration data
     pitch_calibration: float  # Pitch calibration value in degrees
-    yaw_calibration: float    # Yaw calibration value in degrees
-    roll_calibration: float   # Roll calibration value in degrees
-    
+    yaw_calibration: float  # Yaw calibration value in degrees
+    roll_calibration: float  # Roll calibration value in degrees
+
     # Display geometry
-    display_width: int        # Display width in pixels
-    display_height: int       # Display height in pixels
-    origin_x: float           # X coordinate of origin (e.g., screen center)
-    origin_y: float           # Y coordinate of origin
+    display_width: int  # Display width in pixels
+    display_height: int  # Display height in pixels
+    origin_x: float  # X coordinate of origin (e.g., screen center)
+    origin_y: float  # Y coordinate of origin

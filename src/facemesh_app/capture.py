@@ -27,7 +27,6 @@ from .facemesh_dao import (
 )
 
 
-
 # Constants
 CAPTURE_DIR = Path("captures")
 FACE_MESH_CONNECTIONS = list(vision.FaceLandmarksConnections.FACE_LANDMARKS_TESSELATION)
@@ -88,13 +87,17 @@ def _fmt_num(value: Any, precision: int = 3) -> str:
 
 def _safe_lm_xy(lm) -> Optional[Tuple[float, float]]:
     if hasattr(lm, "x") and hasattr(lm, "y"):
-        return safe_float(getattr(lm, "x", 0.0), 0.0), safe_float(getattr(lm, "y", 0.0), 0.0)
+        return safe_float(getattr(lm, "x", 0.0), 0.0), safe_float(
+            getattr(lm, "y", 0.0), 0.0
+        )
     if isinstance(lm, (list, tuple)) and len(lm) >= 2:
         return safe_float(lm[0], 0.0), safe_float(lm[1], 0.0)
     return None
 
 
-def _lm_points_px(landmarks: List[Any], indices: tuple[int, ...], w: int, h: int, mirror_x: bool) -> List[Tuple[int, int]]:
+def _lm_points_px(
+    landmarks: List[Any], indices: tuple[int, ...], w: int, h: int, mirror_x: bool
+) -> List[Tuple[int, int]]:
     points: List[Tuple[int, int]] = []
     for idx in indices:
         if 0 <= int(idx) < len(landmarks):
@@ -125,7 +128,9 @@ def _center_px(points: List[Tuple[int, int]]) -> Optional[Tuple[int, int]]:
     return int(round(sx / n)), int(round(sy / n))
 
 
-def _draw_normal_arrow(img, origin: Tuple[int, int], normal: Any, color, length: int) -> None:
+def _draw_normal_arrow(
+    img, origin: Tuple[int, int], normal: Any, color, length: int
+) -> None:
     if not isinstance(normal, (list, tuple)) or len(normal) < 3:
         return
     nx = safe_float(normal[0], float("nan"))
@@ -169,7 +174,9 @@ def _draw_fitted_ellipse(img, ellipse_payload: Any, color) -> None:
     major = safe_float(axes.get("major"), float("nan"))
     minor = safe_float(axes.get("minor"), float("nan"))
     major_angle = safe_float(angle.get("major"), float("nan"))
-    if not (math.isfinite(major) and math.isfinite(minor) and math.isfinite(major_angle)):
+    if not (
+        math.isfinite(major) and math.isfinite(minor) and math.isfinite(major_angle)
+    ):
         return
     if major <= 1e-6 or minor <= 1e-6:
         return
@@ -177,8 +184,12 @@ def _draw_fitted_ellipse(img, ellipse_payload: Any, color) -> None:
     cy = int(round(safe_float(center[1], 0.0)))
     ax = max(1, int(round(major * 0.5)))
     ay = max(1, int(round(minor * 0.5)))
-    cv2.ellipse(img, (cx, cy), (ax, ay), float(major_angle), 0, 360, WHITE, 3, cv2.LINE_AA)
-    cv2.ellipse(img, (cx, cy), (ax, ay), float(major_angle), 0, 360, color, 1, cv2.LINE_AA)
+    cv2.ellipse(
+        img, (cx, cy), (ax, ay), float(major_angle), 0, 360, WHITE, 3, cv2.LINE_AA
+    )
+    cv2.ellipse(
+        img, (cx, cy), (ax, ay), float(major_angle), 0, 360, color, 1, cv2.LINE_AA
+    )
 
 
 def _build_event_lines(snap_evt: Any, landmarks: List[Any]) -> List[str]:
@@ -199,14 +210,18 @@ def _build_event_lines(snap_evt: Any, landmarks: List[Any]) -> List[str]:
         if mask_meta:
             mask_shape = mask_meta.get("shape", "n/a")
             mask_dtype = mask_meta.get("dtype", "n/a")
-            lines.append(f"mask type={mask_meta.get('type', 'n/a')} shape={mask_shape} dtype={mask_dtype}")
+            lines.append(
+                f"mask type={mask_meta.get('type', 'n/a')} shape={mask_shape} dtype={mask_dtype}"
+            )
         else:
             lines.append("mask: none")
 
         blendshape_map = snap_evt.blendshapes_as_dict() or {}
         lines.append(f"blendshapes={len(blendshape_map)}")
         if blendshape_map:
-            top_blends = sorted(blendshape_map.items(), key=lambda kv: kv[1], reverse=True)[:8]
+            top_blends = sorted(
+                blendshape_map.items(), key=lambda kv: kv[1], reverse=True
+            )[:8]
             for name, score in top_blends:
                 lines.append(f"bs {name}={_fmt_num(score, 4)}")
 
@@ -214,8 +229,10 @@ def _build_event_lines(snap_evt: Any, landmarks: List[Any]) -> List[str]:
         lines.append(f"transform values={len(transform)}")
         if len(transform) >= 16:
             for r in range(4):
-                row = transform[r * 4:(r + 1) * 4]
-                lines.append("m" + str(r) + ": " + " ".join(_fmt_num(v, 4) for v in row))
+                row = transform[r * 4 : (r + 1) * 4]
+                lines.append(
+                    "m" + str(r) + ": " + " ".join(_fmt_num(v, 4) for v in row)
+                )
 
         eyes = snap_evt.eyes_dict()
         left_center = eyes.get("leftIrisCenter")
@@ -244,7 +261,9 @@ def _build_event_lines(snap_evt: Any, landmarks: List[Any]) -> List[str]:
             lines.append(f"transform values={len(transform)}")
         eyes = snap_evt.get("eyes")
         if isinstance(eyes, dict):
-            if isinstance(eyes.get("leftIrisCenter"), list) and isinstance(eyes.get("rightIrisCenter"), list):
+            if isinstance(eyes.get("leftIrisCenter"), list) and isinstance(
+                eyes.get("rightIrisCenter"), list
+            ):
                 lc = eyes.get("leftIrisCenter")
                 rc = eyes.get("rightIrisCenter")
                 lines.append(
@@ -257,7 +276,12 @@ def _build_event_lines(snap_evt: Any, landmarks: List[Any]) -> List[str]:
             l_gaze_pitch = eyes.get("leftEyeGazePitch")
             r_gaze_yaw = eyes.get("rightEyeGazeYaw")
             r_gaze_pitch = eyes.get("rightEyeGazePitch")
-            if l_gaze_yaw is not None or l_gaze_pitch is not None or r_gaze_yaw is not None or r_gaze_pitch is not None:
+            if (
+                l_gaze_yaw is not None
+                or l_gaze_pitch is not None
+                or r_gaze_yaw is not None
+                or r_gaze_pitch is not None
+            ):
                 lines.append(
                     "gazeYawPitch L="
                     f"{_fmt_num(l_gaze_yaw, 2)}/{_fmt_num(l_gaze_pitch, 2)} "
@@ -296,8 +320,14 @@ def _draw_info_panel(img, lines: List[str]) -> None:
     if len(lines) > max_lines:
         draw_lines[-1] = f"... +{len(lines) - max_lines + 1} more"
 
-    widths = [cv2.getTextSize(line, font, scale, thickness)[0][0] for line in draw_lines]
-    box_w = min(max(widths) + pad * 2, img.shape[1] - 20) if widths else min(260, img.shape[1] - 20)
+    widths = [
+        cv2.getTextSize(line, font, scale, thickness)[0][0] for line in draw_lines
+    ]
+    box_w = (
+        min(max(widths) + pad * 2, img.shape[1] - 20)
+        if widths
+        else min(260, img.shape[1] - 20)
+    )
     box_h = line_h * len(draw_lines) + pad * 2
     x0, y0 = 10, 10
     x1, y1 = x0 + box_w, y0 + box_h
@@ -320,12 +350,12 @@ def _draw_face_direction_from_ypr(
     roll_deg: Any,
 ) -> None:
     """Draw face forward vector from yaw/pitch/roll at given origin.
-    
+
     Coordinate System Convention:
     - Yaw: Positive values indicate turning RIGHT, negative values indicate turning LEFT
     - Pitch: Positive values indicate tilting UP, negative values indicate tilting DOWN
     - Roll: Positive values indicate rotating counter-clockwise (tipping left)
-    
+
     The displayed arrow shows the direction the face is looking, with:
     - Cyan arrow for face direction vector
     - Orange tick mark for roll indication
@@ -374,8 +404,14 @@ def _draw_face_direction_from_ypr(
         tx = math.cos(rr)
         ty = -math.sin(rr)
         tick_len = max(10, int(length * 0.25))
-        p1 = (int(round(ox - tx * tick_len * 0.5)), int(round(oy - ty * tick_len * 0.5)))
-        p2 = (int(round(ox + tx * tick_len * 0.5)), int(round(oy + ty * tick_len * 0.5)))
+        p1 = (
+            int(round(ox - tx * tick_len * 0.5)),
+            int(round(oy - ty * tick_len * 0.5)),
+        )
+        p2 = (
+            int(round(ox + tx * tick_len * 0.5)),
+            int(round(oy + ty * tick_len * 0.5)),
+        )
         cv2.line(img, p1, p2, WHITE, 3, cv2.LINE_AA)
         cv2.line(img, p1, p2, ORANGE, 1, cv2.LINE_AA)
 
@@ -432,13 +468,28 @@ def build_camera_capture_marked_image(
             cv2.line(img, p1, p2, (45, 140, 45), 1, cv2.LINE_AA)
 
         for lm in landmarks:
-            cv2.circle(img, _lm_to_px(lm, fw, fh, mirror_x=mirror_view), 1, GREEN, -1, cv2.LINE_AA)
+            cv2.circle(
+                img,
+                _lm_to_px(lm, fw, fh, mirror_x=mirror_view),
+                1,
+                GREEN,
+                -1,
+                cv2.LINE_AA,
+            )
 
     # Draw explicit eye geometry from raw landmarks.
-    left_iris_ring = _lm_points_px(landmarks, LEFT_IRIS_RING_IDXS, fw, fh, mirror_x=mirror_view)
-    right_iris_ring = _lm_points_px(landmarks, RIGHT_IRIS_RING_IDXS, fw, fh, mirror_x=mirror_view)
-    left_eye_keys = _lm_points_px(landmarks, LEFT_EYE_KEY_IDXS, fw, fh, mirror_x=mirror_view)
-    right_eye_keys = _lm_points_px(landmarks, RIGHT_EYE_KEY_IDXS, fw, fh, mirror_x=mirror_view)
+    left_iris_ring = _lm_points_px(
+        landmarks, LEFT_IRIS_RING_IDXS, fw, fh, mirror_x=mirror_view
+    )
+    right_iris_ring = _lm_points_px(
+        landmarks, RIGHT_IRIS_RING_IDXS, fw, fh, mirror_x=mirror_view
+    )
+    left_eye_keys = _lm_points_px(
+        landmarks, LEFT_EYE_KEY_IDXS, fw, fh, mirror_x=mirror_view
+    )
+    right_eye_keys = _lm_points_px(
+        landmarks, RIGHT_EYE_KEY_IDXS, fw, fh, mirror_x=mirror_view
+    )
 
     _draw_ring(img, left_iris_ring, ORANGE)
     _draw_ring(img, right_iris_ring, CYAN)
@@ -446,11 +497,15 @@ def build_camera_capture_marked_image(
     _draw_points(img, right_eye_keys, CYAN, radius=2)
 
     if 0 <= LEFT_IRIS_CENTER_IDX < len(landmarks):
-        left_center = _lm_to_px(landmarks[LEFT_IRIS_CENTER_IDX], fw, fh, mirror_x=mirror_view)
+        left_center = _lm_to_px(
+            landmarks[LEFT_IRIS_CENTER_IDX], fw, fh, mirror_x=mirror_view
+        )
     else:
         left_center = _center_px(left_iris_ring)
     if 0 <= RIGHT_IRIS_CENTER_IDX < len(landmarks):
-        right_center = _lm_to_px(landmarks[RIGHT_IRIS_CENTER_IDX], fw, fh, mirror_x=mirror_view)
+        right_center = _lm_to_px(
+            landmarks[RIGHT_IRIS_CENTER_IDX], fw, fh, mirror_x=mirror_view
+        )
     else:
         right_center = _center_px(right_iris_ring)
     if left_center is not None:
@@ -479,17 +534,21 @@ def build_camera_capture_marked_image(
             r_gaze_pitch = eyes.get("rightEyeGazePitch")
 
     # Get nose position for average gaze vector origin.
-    nose = _lm_to_px(landmarks[1], fw, fh, mirror_x=mirror_view) if len(landmarks) > 1 else (fw // 2, fh // 2)
+    nose = (
+        _lm_to_px(landmarks[1], fw, fh, mirror_x=mirror_view)
+        if len(landmarks) > 1
+        else (fw // 2, fh // 2)
+    )
 
     # Draw gaze vectors from yaw/pitch for each eye from pupil (iris center).
     # Coordinate System Convention: right-positive, up-positive
     def _vector_from_yaw_pitch(yaw_deg, pitch_deg):
         """Convert yaw/pitch to 3D direction vector.
-        
+
         Coordinate System Convention:
         - Yaw: Positive values indicate looking RIGHT, negative values indicate looking LEFT
         - Pitch: Positive values indicate looking UP, negative values indicate looking DOWN
-        
+
         Returns 3D direction vector [vx, vy, vz] where:
         - vx: Horizontal component (positive = right)
         - vy: Vertical component in image coordinates (negative = up in image space)
@@ -511,11 +570,14 @@ def build_camera_capture_marked_image(
     l_gaze_vec = _vector_from_yaw_pitch(l_gaze_yaw, l_gaze_pitch)
     r_gaze_vec = _vector_from_yaw_pitch(r_gaze_yaw, r_gaze_pitch)
 
-
     if left_center is not None and l_gaze_vec is not None:
-        _draw_normal_arrow(img, left_center, l_gaze_vec, YELLOW, max(24, int(min(fw, fh) * 0.08)))
+        _draw_normal_arrow(
+            img, left_center, l_gaze_vec, YELLOW, max(24, int(min(fw, fh) * 0.08))
+        )
     if right_center is not None and r_gaze_vec is not None:
-        _draw_normal_arrow(img, right_center, r_gaze_vec, YELLOW, max(24, int(min(fw, fh) * 0.08)))
+        _draw_normal_arrow(
+            img, right_center, r_gaze_vec, YELLOW, max(24, int(min(fw, fh) * 0.08))
+        )
 
     # Draw average gaze vector from nose.
     if l_gaze_vec is not None and r_gaze_vec is not None:
@@ -524,7 +586,9 @@ def build_camera_capture_marked_image(
             (l_gaze_vec[1] + r_gaze_vec[1]) * 0.5,
             (l_gaze_vec[2] + r_gaze_vec[2]) * 0.5,
         ]
-        _draw_normal_arrow(img, nose, avg_gaze_vec, YELLOW, max(30, int(min(fw, fh) * 0.10)))
+        _draw_normal_arrow(
+            img, nose, avg_gaze_vec, YELLOW, max(30, int(min(fw, fh) * 0.10))
+        )
 
     # Draw face direction vector from nose center using yaw/pitch/roll.
     if isinstance(snap_evt, FaceMeshEvent):
@@ -544,8 +608,12 @@ def build_camera_capture_marked_image(
             snap_evt.get("roll"),
         )
     # Click marker mapped from overlay-space to frame-space.
-    cx = int(clamp(round((float(click_pos[0]) / max(1.0, float(overlay_w))) * fw), 0, fw - 1))
-    cy = int(clamp(round((float(click_pos[1]) / max(1.0, float(overlay_h))) * fh), 0, fh - 1))
+    cx = int(
+        clamp(round((float(click_pos[0]) / max(1.0, float(overlay_w))) * fw), 0, fw - 1)
+    )
+    cy = int(
+        clamp(round((float(click_pos[1]) / max(1.0, float(overlay_h))) * fh), 0, fh - 1)
+    )
     if draw_click:
         cv2.circle(img, (cx, cy), 14, WHITE, -1, cv2.LINE_AA)
         cv2.circle(img, (cx, cy), 11, RED, -1, cv2.LINE_AA)
@@ -554,9 +622,14 @@ def build_camera_capture_marked_image(
     return img, None
 
 
-
-
-def save_test_capture(display: Dict, w: float, h: float, click_pos: Tuple[float, float], worker) -> None:
+def save_test_capture(
+    display: Dict,
+    w: float,
+    h: float,
+    click_pos: Tuple[float, float],
+    frame: Any,
+    evt: Any,
+) -> None:
     """Save test capture with camera frame and mesh data only."""
     CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
     ts = ms_now()
@@ -569,10 +642,10 @@ def save_test_capture(display: Dict, w: float, h: float, click_pos: Tuple[float,
     eye_debug_dir = CAPTURE_DIR / f"{base}_eye_debug"
     json_path = CAPTURE_DIR / f"{base}.json"
 
-    snap = worker.capture_snapshot()
-    snap_evt = snap.get("evt")
-    snap_frame = snap.get("frame")
-    snap_landmarks = snap.get("landmarks")
+    snap_evt = evt
+    snap_frame = frame
+    snap_landmarks = list(evt.landmarks) if evt and evt.landmarks else None
+    snap = {"evt": snap_evt, "frame": snap_frame, "landmarks": snap_landmarks}
 
     if isinstance(snap_evt, FaceMeshEvent):
         event_dump = snap_evt.to_capture_dump()
@@ -598,11 +671,7 @@ def save_test_capture(display: Dict, w: float, h: float, click_pos: Tuple[float,
         }
 
     shot_ok, shot_err = render_camera_capture_marked(
-        str(png_path),
-        snap,
-        overlay_w=w,
-        overlay_h=h,
-        click_pos=(click_x, click_y)
+        str(png_path), snap, overlay_w=w, overlay_h=h, click_pos=(click_x, click_y)
     )
     raw_ok = False
     raw_err: Optional[str] = None
@@ -634,14 +703,19 @@ def save_test_capture(display: Dict, w: float, h: float, click_pos: Tuple[float,
             "ok": raw_ok,
             "error": raw_err,
         },
-       
     }
 
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     if shot_ok and raw_ok:
-        print(f"[test] Saved {png_path.name}, {raw_png_path.name}, and {json_path.name}", flush=True)
+        print(
+            f"[test] Saved {png_path.name}, {raw_png_path.name}, and {json_path.name}",
+            flush=True,
+        )
     elif shot_ok and not raw_ok:
-        print(f"[test] Saved {png_path.name} and {json_path.name} (raw frame failed: {raw_err})", flush=True)
+        print(
+            f"[test] Saved {png_path.name} and {json_path.name} (raw frame failed: {raw_err})",
+            flush=True,
+        )
     else:
         print(
             f"[test] Marked screenshot failed, saved JSON: {json_path.name} "

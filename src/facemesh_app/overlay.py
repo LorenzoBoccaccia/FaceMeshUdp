@@ -16,7 +16,7 @@ from typing import Optional, Dict, Tuple, List
 
 import pygame
 
-from .facemesh_dao import clamp, CalibrationPoint
+from .facemesh_dao import clamp, safe_float, CalibrationPoint
 
 
 # Colors
@@ -81,8 +81,9 @@ def draw_mouse_triangle(surface, x: float, y: float, color=WHITE):
     pygame.draw.polygon(surface, color, (left, right, tip), 0)
 
 
-def draw_capture_hud(surface, font_small, dot_x: float, dot_y: float,
-                   evt: Optional[Dict], fps: float):
+def draw_capture_hud(
+    surface, font_small, dot_x: float, dot_y: float, evt: Optional[Dict], fps: float
+):
     """Draw capture HUD with basic face tracking info."""
     has_face = bool(evt and evt.get("hasFace"))
 
@@ -108,233 +109,225 @@ def draw_capture_hud(surface, font_small, dot_x: float, dot_y: float,
 
 class OverlayManager:
     """Manages pygame overlay rendering and interaction."""
-    
-    def __init__(self, display: Dict, capture_enabled: bool = False, overlay_fps: int = 60,
-                 calibration_mode: bool = False):
-        """Initialize overlay manager.
-        
-        Args:
-            display: Display configuration dict with 'width', 'height', 'x', 'y'
-            capture_enabled: Whether capture mode is enabled
-            overlay_fps: Target framerate for overlay rendering
-            calibration_mode: Whether to enable calibration UI mode
-        """
-        self.display = display
-        self.capture_enabled = capture_enabled
-        self.overlay_fps = overlay_fps
-        self.calibration_mode = calibration_mode
-        self.width = int(display["width"])
-        self.height = int(display["height"])
-        
-        self.screen = None
-        self.clock = None
-        self.font = None
-        self.font_small = None
-        self.hwnd = None
-        
-        self.mouse_x = self.width / 2.0
-        self.mouse_y = self.height / 2.0
-        
-        self.running = False
-        self.should_exit = False
-        
-        # Calibration state attributes
-        self.calibration_sequence: List[Dict] = []
-        self.current_calib_idx: int = 0
-        self.calib_phase: str = "idle"
-        self.calib_phase_start: int = 0
-        self.calib_samples: List[Dict] = []
-    
+
+    def __init__(
+        self,
+        display: Dict,
+        capture_enabled: bool = False,
+        overlay_fps: int = 60,
+        calibration_mode: bool = False,
+    ):
+        self._display = display
+        self._capture_enabled = capture_enabled
+        self._overlay_fps = overlay_fps
+        self._calibration_mode = calibration_mode
+        self._width = int(display["width"])
+        self._height = int(display["height"])
+
+        self._screen = None
+        self._clock = None
+        self._font = None
+        self._font_small = None
+        self._hwnd = None
+
+        self._mouse_x = self._width / 2.0
+        self._mouse_y = self._height / 2.0
+
+        self._running = False
+        self._should_exit = False
+
+        self._calibration_sequence: List[Dict] = []
+        self._current_calib_idx: int = 0
+        self._calib_phase: str = "idle"
+        self._calib_phase_start: int = 0
+        self._calib_samples: List[Dict] = []
+
     def initialize(self):
         """Initialize pygame and create overlay window."""
         pygame.init()
         pygame.font.init()
-        os.environ.setdefault("SDL_VIDEO_WINDOW_POS", f"{self.display['x']},{self.display['y']}")
-        self.screen = pygame.display.set_mode((self.width, self.height), pygame.NOFRAME)
+        os.environ.setdefault(
+            "SDL_VIDEO_WINDOW_POS", f"{self._display['x']},{self._display['y']}"
+        )
+        self._screen = pygame.display.set_mode(
+            (self._width, self._height), pygame.NOFRAME
+        )
         pygame.display.set_caption("FaceMesh Gaze")
-        self.hwnd = pygame.display.get_wm_info().get("window")
-        set_window_transparent(self.hwnd)
-        set_window_topmost(self.hwnd)
-        self.clock = pygame.time.Clock()
-        self.font = pygame.font.Font(None, 80)
-        self.font_small = pygame.font.Font(None, 24)
-        self.running = True
-    
+        self._hwnd = pygame.display.get_wm_info().get("window")
+        set_window_transparent(self._hwnd)
+        set_window_topmost(self._hwnd)
+        self._clock = pygame.time.Clock()
+        self._font = pygame.font.Font(None, 80)
+        self._font_small = pygame.font.Font(None, 24)
+        self._running = True
+
     def shutdown(self):
         """Shutdown pygame overlay."""
-        if self.screen:
+        if self._screen:
             pygame.quit()
-        self.running = False
-    
+        self._running = False
+
     def handle_events(self, on_mouse_motion=None, on_click=None):
         """Handle pygame events."""
         for e in pygame.event.get():
             if e.type == pygame.QUIT:
-                self.should_exit = True
+                self._should_exit = True
             elif e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE:
-                self.should_exit = True
+                self._should_exit = True
             elif e.type == pygame.MOUSEMOTION:
-                self.mouse_x = clamp(float(e.pos[0]), 0.0, self.width - 1.0)
-                self.mouse_y = clamp(float(e.pos[1]), 0.0, self.height - 1.0)
+                self._mouse_x = clamp(float(e.pos[0]), 0.0, self._width - 1.0)
+                self._mouse_y = clamp(float(e.pos[1]), 0.0, self._height - 1.0)
                 if on_mouse_motion:
-                    on_mouse_motion(self.mouse_x, self.mouse_y)
+                    on_mouse_motion(self._mouse_x, self._mouse_y)
             elif e.type == pygame.MOUSEBUTTONDOWN:
                 if on_click and e.button == 1:
                     on_click(e.pos)
-    
+
     def render_mesh(self, evt: Optional[Dict]):
-        """Render face mesh data overlay.
-        
-        If calibration_mode is enabled, renders calibration UI instead of standard overlay.
-        In normal mode, renders gaze dot showing calibrated eye gaze position.
-        """
-        if self.capture_enabled:
-            self.screen.fill(BLACK)
+        """Render face mesh data overlay."""
+        if self._capture_enabled:
+            self._screen.fill(BLACK)
         else:
-            self.screen.fill(KEY_COLOR)
-        
-        # Render calibration UI if in calibration mode
-        if self.calibration_mode and self.calib_phase != "idle":
+            self._screen.fill(KEY_COLOR)
+
+        if self._calibration_mode and self._calib_phase != "idle":
             current_point = self.get_current_calib_point()
             if current_point:
                 current_time = int(time.time() * 1000)
-                elapsed_ms = current_time - self.calib_phase_start
-                
-                # Calculate countdown digit
+                elapsed_ms = current_time - self._calib_phase_start
+
                 countdown_digit = None
-                if self.calib_phase == "countdown":
+                if self._calib_phase == "countdown":
                     remaining = (CALIB_COUNTDOWN_MS - elapsed_ms) // 1000
                     countdown_digit = max(1, int(remaining) + 1)
                     if countdown_digit > 3:
                         countdown_digit = 3
-                
-                self.render_calibration(current_point, self.calib_phase, elapsed_ms, countdown_digit)
-        # Normal mode: render gaze dot showing calibrated eye gaze position
-        elif not self.calibration_mode:
+
+                self.render_calibration(
+                    current_point, self._calib_phase, elapsed_ms, countdown_digit
+                )
+        elif not self._calibration_mode:
             self.render_gaze_dot(evt)
-            # Render capture HUD if capture mode is enabled
-            if self.capture_enabled and evt:
-                fps = self.clock.get_fps()
-                # Use center of screen as default position for HUD
-                draw_capture_hud(self.screen, self.font_small, self.width / 2, self.height / 2, evt, fps)
-                draw_mouse_triangle(self.screen, self.mouse_x, self.mouse_y)
-        
+            if self._capture_enabled and evt:
+                fps = self._clock.get_fps()
+                draw_capture_hud(
+                    self._screen,
+                    self._font_small,
+                    self._width / 2,
+                    self._height / 2,
+                    evt,
+                    fps,
+                )
+                draw_mouse_triangle(self._screen, self._mouse_x, self._mouse_y)
+
         pygame.display.update()
-        self.clock.tick(max(1, int(self.overlay_fps)))
-    
+        self._clock.tick(max(1, int(self._overlay_fps)))
+
     def clear(self):
         """Clear screen."""
-        if self.capture_enabled:
-            self.screen.fill(BLACK)
+        if self._capture_enabled:
+            self._screen.fill(BLACK)
         else:
-            self.screen.fill(KEY_COLOR)
-    
+            self._screen.fill(KEY_COLOR)
+
     def update(self):
         """Update display."""
         pygame.display.update()
-        if self.clock:
-            self.clock.tick(max(1, int(self.overlay_fps)))
-    
+        if self._clock:
+            self._clock.tick(max(1, int(self._overlay_fps)))
+
     def get_mouse_position(self) -> Tuple[float, float]:
         """Get current mouse position."""
-        return self.mouse_x, self.mouse_y
-    
+        return self._mouse_x, self._mouse_y
+
     def start_calibration_sequence(self, width: float, height: float):
-        """Start a 9-point calibration sequence.
-        
-        Creates calibration points: center, corners, and midpoints.
-        Resets calibration state and starts with blink_pre phase.
-        
-        Args:
-            width: Screen width in pixels
-            height: Screen height in pixels
-        """
-        self.calibration_sequence = self._make_calib_seq(width, height)
-        self.current_calib_idx = 0
-        self.calib_phase = "blink_pre"
-        self.calib_phase_start = int(time.time() * 1000)
-        self.calib_samples = []
-    
+        """Start a 9-point calibration sequence."""
+        self._calibration_sequence = self._make_calib_seq(width, height)
+        self._current_calib_idx = 0
+        self._calib_phase = "blink_pre"
+        self._calib_phase_start = int(time.time() * 1000)
+        self._calib_samples = []
+
     def get_current_calib_point(self) -> Optional[Dict]:
-        """Get the current calibration point.
-        
-        Returns:
-            Current calibration point dict with keys 'name', 'x', 'y',
-            or None if index is out of range
-        """
-        if 0 <= self.current_calib_idx < len(self.calibration_sequence):
-            return self.calibration_sequence[self.current_calib_idx]
+        if 0 <= self._current_calib_idx < len(self._calibration_sequence):
+            return self._calibration_sequence[self._current_calib_idx]
         return None
-    
-    def update_calibration_state(self, evt: Dict) -> Tuple[bool, Optional[CalibrationPoint]]:
+
+    def update_calibration_state(
+        self, evt: Dict
+    ) -> Tuple[bool, Optional[CalibrationPoint]]:
         """Update calibration state based on elapsed time.
-        
-        Coordinate System Convention:
-        - All eye gaze angles use left-positive, up-positive convention
-        - calibrated_combined_eye_gaze_yaw: Positive = looking LEFT, negative = looking RIGHT
-        - calibrated_combined_eye_gaze_pitch: Positive = looking UP, negative = looking DOWN
-        
+
         Manages phase transitions through: blink_pre -> countdown -> sampling -> blink_post.
-        Collects eye gaze samples during sampling phase.
-        
-        Args:
-            evt: Face tracking event dict containing eye gaze data with keys:
-                - calibrated_combined_eye_gaze_yaw: Combined eye yaw angle (left-positive)
-                - calibrated_combined_eye_gaze_pitch: Combined eye pitch angle (up-positive)
-                - calibrated_left_eye_gaze_yaw: Left eye yaw angle (left-positive)
-                - calibrated_left_eye_gaze_pitch: Left eye pitch angle (up-positive)
-                - calibrated_right_eye_gaze_yaw: Right eye yaw angle (left-positive)
-                - calibrated_right_eye_gaze_pitch: Right eye pitch angle (up-positive)
-            
-        Returns:
-            Tuple of (completed: bool, calibration_point: Optional[CalibrationPoint]).
-            completed is True when all 9 points are finished.
-            calibration_point is only returned when a single point is fully completed.
+        Collects eye gaze samples during sampling phase and returns a complete
+        CalibrationPoint with head pose and zeta data included.
         """
         current_time = int(time.time() * 1000)
-        elapsed_ms = current_time - self.calib_phase_start
+        elapsed_ms = current_time - self._calib_phase_start
         current_point = self.get_current_calib_point()
-        
+        fallback_zeta = max(self._width, self._height) * 0.75
+
         if current_point is None:
             return True, None
-        
-        # Phase transitions
-        if self.calib_phase == "blink_pre":
+
+        if self._calib_phase == "blink_pre":
             if elapsed_ms >= CALIB_BLINK_MS:
-                self.calib_phase = "countdown"
-                self.calib_phase_start = current_time
-                
-        elif self.calib_phase == "countdown":
+                self._calib_phase = "countdown"
+                self._calib_phase_start = current_time
+
+        elif self._calib_phase == "countdown":
             if elapsed_ms >= CALIB_COUNTDOWN_MS:
-                self.calib_phase = "sampling"
-                self.calib_phase_start = current_time
-                self.calib_samples = []
-                
-        elif self.calib_phase == "sampling":
-            # Collect samples
+                self._calib_phase = "sampling"
+                self._calib_phase_start = current_time
+                self._calib_samples = []
+
+        elif self._calib_phase == "sampling":
             if evt:
                 combined_yaw = evt.get("calibrated_combined_eye_gaze_yaw")
                 combined_pitch = evt.get("calibrated_combined_eye_gaze_pitch")
                 if combined_yaw is not None and combined_pitch is not None:
-                    self.calib_samples.append({
-                        "eye_yaw": combined_yaw,
-                        "eye_pitch": combined_pitch,
-                        "left_eye_yaw": evt.get("calibrated_left_eye_gaze_yaw") or 0.0,
-                        "left_eye_pitch": evt.get("calibrated_left_eye_gaze_pitch") or 0.0,
-                        "right_eye_yaw": evt.get("calibrated_right_eye_gaze_yaw") or 0.0,
-                        "right_eye_pitch": evt.get("calibrated_right_eye_gaze_pitch") or 0.0,
-                    })
-            
+                    self._calib_samples.append(
+                        {
+                            "eye_yaw": combined_yaw,
+                            "eye_pitch": combined_pitch,
+                            "left_eye_yaw": evt.get("calibrated_left_eye_gaze_yaw")
+                            or 0.0,
+                            "left_eye_pitch": evt.get("calibrated_left_eye_gaze_pitch")
+                            or 0.0,
+                            "right_eye_yaw": evt.get("calibrated_right_eye_gaze_yaw")
+                            or 0.0,
+                            "right_eye_pitch": evt.get(
+                                "calibrated_right_eye_gaze_pitch"
+                            )
+                            or 0.0,
+                        }
+                    )
+
             if elapsed_ms >= CALIB_AVG_MS:
-                # Calculate averages and create CalibrationPoint
-                if self.calib_samples:
-                    avg_yaw = sum(s["eye_yaw"] for s in self.calib_samples) / len(self.calib_samples)
-                    avg_pitch = sum(s["eye_pitch"] for s in self.calib_samples) / len(self.calib_samples)
-                    avg_left_yaw = sum(s["left_eye_yaw"] for s in self.calib_samples) / len(self.calib_samples)
-                    avg_left_pitch = sum(s["left_eye_pitch"] for s in self.calib_samples) / len(self.calib_samples)
-                    avg_right_yaw = sum(s["right_eye_yaw"] for s in self.calib_samples) / len(self.calib_samples)
-                    avg_right_pitch = sum(s["right_eye_pitch"] for s in self.calib_samples) / len(self.calib_samples)
-                    
+                head_yaw = safe_float(evt.get("head_yaw") if evt else None, 0.0)
+                head_pitch = safe_float(evt.get("head_pitch") if evt else None, 0.0)
+                zeta = safe_float(evt.get("zeta") if evt else None, fallback_zeta)
+
+                if self._calib_samples:
+                    avg_yaw = sum(s["eye_yaw"] for s in self._calib_samples) / len(
+                        self._calib_samples
+                    )
+                    avg_pitch = sum(s["eye_pitch"] for s in self._calib_samples) / len(
+                        self._calib_samples
+                    )
+                    avg_left_yaw = sum(
+                        s["left_eye_yaw"] for s in self._calib_samples
+                    ) / len(self._calib_samples)
+                    avg_left_pitch = sum(
+                        s["left_eye_pitch"] for s in self._calib_samples
+                    ) / len(self._calib_samples)
+                    avg_right_yaw = sum(
+                        s["right_eye_yaw"] for s in self._calib_samples
+                    ) / len(self._calib_samples)
+                    avg_right_pitch = sum(
+                        s["right_eye_pitch"] for s in self._calib_samples
+                    ) / len(self._calib_samples)
+
                     calib_point = CalibrationPoint(
                         name=current_point["name"],
                         screen_x=current_point["x"],
@@ -345,10 +338,12 @@ class OverlayManager:
                         raw_left_eye_pitch=avg_left_pitch,
                         raw_right_eye_yaw=avg_right_yaw,
                         raw_right_eye_pitch=avg_right_pitch,
-                        sample_count=len(self.calib_samples)
+                        sample_count=len(self._calib_samples),
+                        head_yaw=head_yaw,
+                        head_pitch=head_pitch,
+                        zeta=zeta,
                     )
                 else:
-                    # No samples collected, create CalibrationPoint with zeros
                     calib_point = CalibrationPoint(
                         name=current_point["name"],
                         screen_x=current_point["x"],
@@ -359,163 +354,117 @@ class OverlayManager:
                         raw_left_eye_pitch=0.0,
                         raw_right_eye_yaw=0.0,
                         raw_right_eye_pitch=0.0,
-                        sample_count=0
+                        sample_count=0,
+                        head_yaw=head_yaw,
+                        head_pitch=head_pitch,
+                        zeta=zeta,
                     )
-                
-                self.calib_phase = "blink_post"
-                self.calib_phase_start = current_time
+
+                self._calib_phase = "blink_post"
+                self._calib_phase_start = current_time
                 return False, calib_point
-                
-        elif self.calib_phase == "blink_post":
+
+        elif self._calib_phase == "blink_post":
             if elapsed_ms >= CALIB_BLINK_MS:
-                # Move to next point
-                self.current_calib_idx += 1
+                self._current_calib_idx += 1
                 current_point = self.get_current_calib_point()
-                
+
                 if current_point is None:
-                    # All points completed
                     return True, None
-                
-                # Reset for next point
-                self.calib_phase = "blink_pre"
-                self.calib_phase_start = current_time
-                self.calib_samples = []
-        
+
+                self._calib_phase = "blink_pre"
+                self._calib_phase_start = current_time
+                self._calib_samples = []
+
         return False, None
-    
-    def render_calibration(self, current_point: Dict, phase: str, elapsed_ms: int,
-                           countdown_digit: Optional[int] = None):
-        """Render calibration UI elements.
-        
-        Renders the calibration dot with appropriate color based on phase:
-        - RED during countdown phase
-        - GREEN during sampling phase
-        - WHITE during blink phases
-        
-        Handles blinking during blink phases (220ms period).
-        Shows countdown digit during countdown phase.
-        
-        Args:
-            current_point: Dict with 'name', 'x', 'y' for current point position
-            phase: Current calibration phase ('blink_pre', 'countdown', 'sampling', 'blink_post')
-            elapsed_ms: Time elapsed in current phase (milliseconds)
-            countdown_digit: Optional digit to display during countdown (3, 2, 1)
-        """
+
+    def render_calibration(
+        self,
+        current_point: Dict,
+        phase: str,
+        elapsed_ms: int,
+        countdown_digit: Optional[int] = None,
+    ):
+        """Render calibration UI elements."""
         x = int(current_point["x"])
         y = int(current_point["y"])
-        
-        # Determine dot color based on phase
+
         if phase == "countdown":
             dot_color = RED
         elif phase == "sampling":
             dot_color = GREEN
         else:
-            # Blink phases
             if (elapsed_ms // CALIB_BLINK_PERIOD_MS) % 2 == 0:
                 dot_color = WHITE
             else:
-                dot_color = None  # Don't draw during off cycle
-        
+                dot_color = None
+
         if dot_color:
-            # Draw main dot
-            pygame.draw.circle(self.screen, dot_color, (x, y), DOT_RADIUS)
-            # Draw white ring around dot
-            pygame.draw.circle(self.screen, WHITE, (x, y), DOT_RADIUS + 2, 2)
-        
-        # Show countdown digit during countdown phase
+            pygame.draw.circle(self._screen, dot_color, (x, y), DOT_RADIUS)
+            pygame.draw.circle(self._screen, WHITE, (x, y), DOT_RADIUS + 2, 2)
+
         if phase == "countdown" and countdown_digit is not None:
             digit_text = str(countdown_digit)
-            text_img = self.font.render(digit_text, True, WHITE)
+            text_img = self._font.render(digit_text, True, WHITE)
             text_rect = text_img.get_rect(center=(x, y))
-            self.screen.blit(text_img, text_rect)
-    
+            self._screen.blit(text_img, text_rect)
+
     def render_gaze_dot(self, evt: Optional[Dict]):
-        """Render three gaze dots showing different angle combinations.
-        
-        Coordinate System Convention (left-positive, up-positive):
-        - Head yaw/pitch: Positive = turning LEFT / tilting UP
-        - Eye yaw/pitch: Positive = looking LEFT / looking UP
-        - Screen mapping: +yaw moves left, +pitch moves up (negative screen Y)
-        
-        Three dots:
-        - Blue: Combined head + eye angles (total gaze)
-        - Red: Head angles only
-        - Green: Eye angles only
-        
-        Args:
-            evt: Face tracking event dict containing:
-                - head_yaw, head_pitch: Head pose angles (degrees)
-                - calibrated_combined_eye_gaze_yaw: Eye gaze horizontal (degrees)
-                - calibrated_combined_eye_gaze_pitch: Eye gaze vertical (degrees)
-        """
+        """Render three gaze dots showing different angle combinations."""
         if not evt:
             return
-        
-        # Extract head angles
+
         head_yaw = evt.get("head_yaw")
         head_pitch = evt.get("head_pitch")
-        
-        # Extract eye gaze angles
+
         eye_yaw = evt.get("calibrated_combined_eye_gaze_yaw")
         eye_pitch = evt.get("calibrated_combined_eye_gaze_pitch")
-        
-        # Need both head and eye for rendering
+
         if head_yaw is None or head_pitch is None:
             return
         if eye_yaw is None or eye_pitch is None:
             return
-        
-        # Using 14.0 pixels per degree scaling factor
+
         SCALE = 14.0
-        
-        # RED DOT: Head angles only
-        red_x = self.width / 2 - head_yaw * SCALE
-        red_y = self.height / 2 - head_pitch * SCALE
-        red_x = clamp(red_x, 0, self.width)
-        red_y = clamp(red_y, 0, self.height)
-        
-        # GREEN DOT: Eye angles only
-        green_x = self.width / 2 - eye_yaw * SCALE
-        green_y = self.height / 2 - eye_pitch * SCALE
-        green_x = clamp(green_x, 0, self.width)
-        green_y = clamp(green_y, 0, self.height)
-        
-        # BLUE DOT: Combined head + eye angles
-        blue_x = self.width / 2 - (head_yaw + eye_yaw) * SCALE
-        blue_y = self.height / 2 - (head_pitch + eye_pitch) * SCALE
-        blue_x = clamp(blue_x, 0, self.width)
-        blue_y = clamp(blue_y, 0, self.height)
-        
-        # Draw red dot (head only) with white ring
-        pygame.draw.circle(self.screen, RED, (int(red_x), int(red_y)), DOT_RADIUS)
-        pygame.draw.circle(self.screen, WHITE, (int(red_x), int(red_y)), DOT_RADIUS + 2, 2)
-        
-        # Draw green dot (eye only) with white ring
-        pygame.draw.circle(self.screen, GREEN, (int(green_x), int(green_y)), DOT_RADIUS)
-        pygame.draw.circle(self.screen, WHITE, (int(green_x), int(green_y)), DOT_RADIUS + 2, 2)
-        
-        # Draw blue dot (head + eye) with white ring (on top)
-        pygame.draw.circle(self.screen, BLUE, (int(blue_x), int(blue_y)), DOT_RADIUS)
-        pygame.draw.circle(self.screen, WHITE, (int(blue_x), int(blue_y)), DOT_RADIUS + 2, 2)
-    
+
+        red_x = self._width / 2 - head_yaw * SCALE
+        red_y = self._height / 2 - head_pitch * SCALE
+        red_x = clamp(red_x, 0, self._width)
+        red_y = clamp(red_y, 0, self._height)
+
+        green_x = self._width / 2 - eye_yaw * SCALE
+        green_y = self._height / 2 - eye_pitch * SCALE
+        green_x = clamp(green_x, 0, self._width)
+        green_y = clamp(green_y, 0, self._height)
+
+        blue_x = self._width / 2 - (head_yaw + eye_yaw) * SCALE
+        blue_y = self._height / 2 - (head_pitch + eye_pitch) * SCALE
+        blue_x = clamp(blue_x, 0, self._width)
+        blue_y = clamp(blue_y, 0, self._height)
+
+        pygame.draw.circle(self._screen, RED, (int(red_x), int(red_y)), DOT_RADIUS)
+        pygame.draw.circle(
+            self._screen, WHITE, (int(red_x), int(red_y)), DOT_RADIUS + 2, 2
+        )
+
+        pygame.draw.circle(
+            self._screen, GREEN, (int(green_x), int(green_y)), DOT_RADIUS
+        )
+        pygame.draw.circle(
+            self._screen, WHITE, (int(green_x), int(green_y)), DOT_RADIUS + 2, 2
+        )
+
+        pygame.draw.circle(self._screen, BLUE, (int(blue_x), int(blue_y)), DOT_RADIUS)
+        pygame.draw.circle(
+            self._screen, WHITE, (int(blue_x), int(blue_y)), DOT_RADIUS + 2, 2
+        )
+
     def _make_calib_seq(self, width: float, height: float) -> List[Dict]:
-        """Generate 9-point calibration sequence positions.
-        
-        Creates calibration points in order: C, TL, TC, TR, R, BR, BC, BL, L
-        (Center, Top-Left, Top-Center, Top-Right, Right, Bottom-Right,
-         Bottom-Center, Bottom-Left, Left)
-        
-        Args:
-            width: Screen width in pixels
-            height: Screen height in pixels
-            
-        Returns:
-            List of dicts with 'name', 'x', 'y' keys for each point
-        """
+        """Generate 9-point calibration sequence positions."""
         inset = CALIB_INSET
         w = width
         h = height
-        
+
         return [
             {"name": "C", "x": w / 2, "y": h / 2},
             {"name": "TL", "x": inset, "y": inset},
@@ -527,10 +476,14 @@ class OverlayManager:
             {"name": "BL", "x": inset, "y": h - inset},
             {"name": "L", "x": inset, "y": h / 2},
         ]
-    
+
+    def request_exit(self) -> None:
+        """Signal the overlay to exit on the next event loop iteration."""
+        self._should_exit = True
+
     def is_running(self) -> bool:
         """Check if overlay is still running."""
-        return self.running and not self.should_exit
+        return self._running and not self._should_exit
 
 
 def get_display_geo() -> Dict:
@@ -542,7 +495,7 @@ def get_display_geo() -> Dict:
             "x": 0,
             "y": 0,
             "width": int(user32.GetSystemMetrics(0)),
-            "height": int(user32.GetSystemMetrics(1))
+            "height": int(user32.GetSystemMetrics(1)),
         }
     pygame.display.init()
     sizes = pygame.display.get_desktop_sizes()

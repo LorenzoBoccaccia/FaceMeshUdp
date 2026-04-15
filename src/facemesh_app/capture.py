@@ -423,6 +423,7 @@ def render_camera_capture_marked(
     overlay_h: float,
     click_pos: Tuple[float, float],
     draw_click: bool = True,
+    draw_info_panel: bool = True,
 ) -> Tuple[bool, Optional[str]]:
     """Render camera frame with face mesh landmarks and save to file."""
     img, err = build_camera_capture_marked_image(
@@ -431,6 +432,7 @@ def render_camera_capture_marked(
         overlay_h=overlay_h,
         click_pos=click_pos,
         draw_click=draw_click,
+        draw_info_panel=draw_info_panel,
     )
     if img is None:
         return False, err or "No camera frame available yet."
@@ -444,6 +446,7 @@ def build_camera_capture_marked_image(
     overlay_h: float,
     click_pos: Tuple[float, float],
     draw_click: bool = True,
+    draw_info_panel: bool = True,
 ) -> Tuple[Optional[np.ndarray], Optional[str]]:
     """Build marked camera frame with face mesh, ovals, and vectors."""
     frame = snap.get("frame")
@@ -572,22 +575,39 @@ def build_camera_capture_marked_image(
 
     if left_center is not None and l_gaze_vec is not None:
         _draw_normal_arrow(
-            img, left_center, l_gaze_vec, YELLOW, max(24, int(min(fw, fh) * 0.08))
+            img,
+            left_center,
+            l_gaze_vec,
+            YELLOW,
+            max(24, int(min(fw, fh) * 0.08)),
         )
     if right_center is not None and r_gaze_vec is not None:
         _draw_normal_arrow(
-            img, right_center, r_gaze_vec, YELLOW, max(24, int(min(fw, fh) * 0.08))
+            img,
+            right_center,
+            r_gaze_vec,
+            YELLOW,
+            max(24, int(min(fw, fh) * 0.08)),
         )
 
-    # Draw average gaze vector from nose.
-    if l_gaze_vec is not None and r_gaze_vec is not None:
-        avg_gaze_vec = [
-            (l_gaze_vec[0] + r_gaze_vec[0]) * 0.5,
-            (l_gaze_vec[1] + r_gaze_vec[1]) * 0.5,
-            (l_gaze_vec[2] + r_gaze_vec[2]) * 0.5,
-        ]
+    if l_gaze_yaw is not None and r_gaze_yaw is not None:
+        combined_gaze_yaw = (safe_float(l_gaze_yaw, 0.0) + safe_float(r_gaze_yaw, 0.0)) * 0.5
+    else:
+        combined_gaze_yaw = None
+    if l_gaze_pitch is not None and r_gaze_pitch is not None:
+        combined_gaze_pitch = (
+            safe_float(l_gaze_pitch, 0.0) + safe_float(r_gaze_pitch, 0.0)
+        ) * 0.5
+    else:
+        combined_gaze_pitch = None
+    combined_gaze_vec = _vector_from_yaw_pitch(combined_gaze_yaw, combined_gaze_pitch)
+    if combined_gaze_vec is not None:
         _draw_normal_arrow(
-            img, nose, avg_gaze_vec, YELLOW, max(30, int(min(fw, fh) * 0.10))
+            img,
+            nose,
+            combined_gaze_vec,
+            YELLOW,
+            max(30, int(min(fw, fh) * 0.10)),
         )
 
     # Draw face direction vector from nose center using yaw/pitch/roll.
@@ -618,7 +638,8 @@ def build_camera_capture_marked_image(
         cv2.circle(img, (cx, cy), 14, WHITE, -1, cv2.LINE_AA)
         cv2.circle(img, (cx, cy), 11, RED, -1, cv2.LINE_AA)
 
-    _draw_info_panel(img, _build_event_lines(snap_evt, landmarks))
+    if draw_info_panel:
+        _draw_info_panel(img, _build_event_lines(snap_evt, landmarks))
     return img, None
 
 
@@ -629,8 +650,9 @@ def save_test_capture(
     click_pos: Tuple[float, float],
     frame: Any,
     evt: Any,
+    runtime_evt: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Save test capture with camera frame and mesh data only."""
+    """Save a capture payload that supports offline calibration diagnostics."""
     CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
     ts = ms_now()
     click_x = clamp(float(click_pos[0]), 0.0, w - 1.0)
@@ -692,6 +714,63 @@ def save_test_capture(
             "yScreen": float(display["y"]) + click_y,
         },
         "faceMeshEvent": event_dump,
+        "runtimeEvent": runtime_evt,
+        "calibratedGaze": (
+            {
+                "faceDeltaYaw": runtime_evt.get("face_delta_yaw"),
+                "faceDeltaPitch": runtime_evt.get("face_delta_pitch"),
+                "correctedEyeYaw": runtime_evt.get("corrected_eye_yaw"),
+                "correctedEyePitch": runtime_evt.get("corrected_eye_pitch"),
+                "correctedYaw": runtime_evt.get("corrected_yaw"),
+                "correctedPitch": runtime_evt.get("corrected_pitch"),
+                "correctedYawLinear": runtime_evt.get("corrected_yaw_linear"),
+                "correctedPitchLinear": runtime_evt.get("corrected_pitch_linear"),
+                "correctedScreenX": runtime_evt.get("corrected_screen_x"),
+                "correctedScreenY": runtime_evt.get("corrected_screen_y"),
+                "overlayX": runtime_evt.get("overlay_x"),
+                "overlayY": runtime_evt.get("overlay_y"),
+            }
+            if isinstance(runtime_evt, dict)
+            else None
+        ),
+        "calibrationModel": (
+            {
+                "centerEyeYaw": runtime_evt.get("center_eye_yaw"),
+                "centerEyePitch": runtime_evt.get("center_eye_pitch"),
+                "faceCenterYaw": runtime_evt.get("face_center_yaw"),
+                "faceCenterPitch": runtime_evt.get("face_center_pitch"),
+                "faceCenterX": runtime_evt.get("face_center_x"),
+                "faceCenterY": runtime_evt.get("face_center_y"),
+                "faceCenterZ": runtime_evt.get("face_center_z"),
+                "centerZeta": runtime_evt.get("center_zeta"),
+                "matrixYawYaw": runtime_evt.get("matrix_yaw_yaw"),
+                "matrixYawPitch": runtime_evt.get("matrix_yaw_pitch"),
+                "matrixPitchYaw": runtime_evt.get("matrix_pitch_yaw"),
+                "matrixPitchPitch": runtime_evt.get("matrix_pitch_pitch"),
+                "screenCenterCamX": runtime_evt.get("screen_center_cam_x"),
+                "screenCenterCamY": runtime_evt.get("screen_center_cam_y"),
+                "screenCenterCamZ": runtime_evt.get("screen_center_cam_z"),
+                "screenAxisXX": runtime_evt.get("screen_axis_x_x"),
+                "screenAxisXY": runtime_evt.get("screen_axis_x_y"),
+                "screenAxisXZ": runtime_evt.get("screen_axis_x_z"),
+                "screenAxisYX": runtime_evt.get("screen_axis_y_x"),
+                "screenAxisYY": runtime_evt.get("screen_axis_y_y"),
+                "screenAxisYZ": runtime_evt.get("screen_axis_y_z"),
+                "screenFitRmse": runtime_evt.get("screen_fit_rmse"),
+            }
+            if isinstance(runtime_evt, dict)
+            else None
+        ),
+        "displayGeometry": (
+            {
+                "originX": runtime_evt.get("origin_x"),
+                "originY": runtime_evt.get("origin_y"),
+                "width": runtime_evt.get("display_width"),
+                "height": runtime_evt.get("display_height"),
+            }
+            if isinstance(runtime_evt, dict)
+            else None
+        ),
         "meshData": mesh_data,
         "screenshot": {
             "path": str(png_path),

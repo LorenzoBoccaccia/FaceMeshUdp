@@ -13,7 +13,9 @@ import mediapipe as mp
 import numpy as np
 from mediapipe.tasks.python import vision
 
-from .facemesh_dao import FaceMeshEvent, CalibratedFaceAndGazeEvent
+from .calibration import CalibratedFaceAndGazeEvent
+from .facemesh_dao import FaceMeshEvent
+from .gaze_primitives import collect_gaze_primitives, draw_gaze_primitives_cv2
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +73,26 @@ class CalibrationAdapterStep:
         pitch_calibration: float = 0.0,
         yaw_calibration: float = 0.0,
         roll_calibration: float = 0.0,
+        face_center_yaw: float = 0.0,
+        face_center_pitch: float = 0.0,
+        center_zeta: float = 1200.0,
+        matrix_yaw_yaw: float = 1.0,
+        matrix_yaw_pitch: float = 0.0,
+        matrix_pitch_yaw: float = 0.0,
+        matrix_pitch_pitch: float = 1.0,
+        face_center_x: float = 0.0,
+        face_center_y: float = 0.0,
+        face_center_z: float = 1200.0,
+        screen_center_cam_x: float = 0.0,
+        screen_center_cam_y: float = 0.0,
+        screen_center_cam_z: float = 1200.0,
+        screen_axis_x_x: float = 1.0,
+        screen_axis_x_y: float = 0.0,
+        screen_axis_x_z: float = 0.0,
+        screen_axis_y_x: float = 0.0,
+        screen_axis_y_y: float = 1.0,
+        screen_axis_y_z: float = 0.0,
+        screen_fit_rmse: float = -1.0,
         display_width: int = 1920,
         display_height: int = 1080,
         origin_x: float = 960.0,
@@ -90,12 +112,58 @@ class CalibrationAdapterStep:
         self.pitch_calibration = float(pitch_calibration)
         self.yaw_calibration = float(yaw_calibration)
         self.roll_calibration = float(roll_calibration)
+        self.face_center_yaw = float(face_center_yaw)
+        self.face_center_pitch = float(face_center_pitch)
+        self.center_zeta = float(center_zeta)
+        self.matrix_yaw_yaw = float(matrix_yaw_yaw)
+        self.matrix_yaw_pitch = float(matrix_yaw_pitch)
+        self.matrix_pitch_yaw = float(matrix_pitch_yaw)
+        self.matrix_pitch_pitch = float(matrix_pitch_pitch)
+        self.face_center_x = float(face_center_x)
+        self.face_center_y = float(face_center_y)
+        self.face_center_z = float(face_center_z)
+        self.screen_center_cam_x = float(screen_center_cam_x)
+        self.screen_center_cam_y = float(screen_center_cam_y)
+        self.screen_center_cam_z = float(screen_center_cam_z)
+        self.screen_axis_x_x = float(screen_axis_x_x)
+        self.screen_axis_x_y = float(screen_axis_x_y)
+        self.screen_axis_x_z = float(screen_axis_x_z)
+        self.screen_axis_y_x = float(screen_axis_y_x)
+        self.screen_axis_y_y = float(screen_axis_y_y)
+        self.screen_axis_y_z = float(screen_axis_y_z)
+        self.screen_fit_rmse = float(screen_fit_rmse)
         self.display_width = int(display_width)
         self.display_height = int(display_height)
         self.origin_x = float(origin_x)
         self.origin_y = float(origin_y)
 
-    def update_calibration(self, pitch: float, yaw: float, roll: float) -> None:
+    def update_calibration(
+        self,
+        pitch: float,
+        yaw: float,
+        roll: float,
+        *,
+        face_center_yaw: Optional[float] = None,
+        face_center_pitch: Optional[float] = None,
+        center_zeta: Optional[float] = None,
+        matrix_yaw_yaw: Optional[float] = None,
+        matrix_yaw_pitch: Optional[float] = None,
+        matrix_pitch_yaw: Optional[float] = None,
+        matrix_pitch_pitch: Optional[float] = None,
+        face_center_x: Optional[float] = None,
+        face_center_y: Optional[float] = None,
+        face_center_z: Optional[float] = None,
+        screen_center_cam_x: Optional[float] = None,
+        screen_center_cam_y: Optional[float] = None,
+        screen_center_cam_z: Optional[float] = None,
+        screen_axis_x_x: Optional[float] = None,
+        screen_axis_x_y: Optional[float] = None,
+        screen_axis_x_z: Optional[float] = None,
+        screen_axis_y_x: Optional[float] = None,
+        screen_axis_y_y: Optional[float] = None,
+        screen_axis_y_z: Optional[float] = None,
+        screen_fit_rmse: Optional[float] = None,
+    ) -> None:
         """Update calibration values.
 
         Args:
@@ -106,6 +174,46 @@ class CalibrationAdapterStep:
         self.pitch_calibration = float(pitch)
         self.yaw_calibration = float(yaw)
         self.roll_calibration = float(roll)
+        if face_center_yaw is not None:
+            self.face_center_yaw = float(face_center_yaw)
+        if face_center_pitch is not None:
+            self.face_center_pitch = float(face_center_pitch)
+        if center_zeta is not None:
+            self.center_zeta = float(center_zeta)
+        if matrix_yaw_yaw is not None:
+            self.matrix_yaw_yaw = float(matrix_yaw_yaw)
+        if matrix_yaw_pitch is not None:
+            self.matrix_yaw_pitch = float(matrix_yaw_pitch)
+        if matrix_pitch_yaw is not None:
+            self.matrix_pitch_yaw = float(matrix_pitch_yaw)
+        if matrix_pitch_pitch is not None:
+            self.matrix_pitch_pitch = float(matrix_pitch_pitch)
+        if face_center_x is not None:
+            self.face_center_x = float(face_center_x)
+        if face_center_y is not None:
+            self.face_center_y = float(face_center_y)
+        if face_center_z is not None:
+            self.face_center_z = float(face_center_z)
+        if screen_center_cam_x is not None:
+            self.screen_center_cam_x = float(screen_center_cam_x)
+        if screen_center_cam_y is not None:
+            self.screen_center_cam_y = float(screen_center_cam_y)
+        if screen_center_cam_z is not None:
+            self.screen_center_cam_z = float(screen_center_cam_z)
+        if screen_axis_x_x is not None:
+            self.screen_axis_x_x = float(screen_axis_x_x)
+        if screen_axis_x_y is not None:
+            self.screen_axis_x_y = float(screen_axis_x_y)
+        if screen_axis_x_z is not None:
+            self.screen_axis_x_z = float(screen_axis_x_z)
+        if screen_axis_y_x is not None:
+            self.screen_axis_y_x = float(screen_axis_y_x)
+        if screen_axis_y_y is not None:
+            self.screen_axis_y_y = float(screen_axis_y_y)
+        if screen_axis_y_z is not None:
+            self.screen_axis_y_z = float(screen_axis_y_z)
+        if screen_fit_rmse is not None:
+            self.screen_fit_rmse = float(screen_fit_rmse)
         logger.debug(f"Calibration updated: pitch={pitch}, yaw={yaw}, roll={roll}")
 
     def update_display_geometry(
@@ -145,6 +253,18 @@ class CalibrationAdapterStep:
         if face_mesh_event is None:
             logger.debug("FaceMeshEvent is None, returning None")
             return None
+        if not face_mesh_event.has_face:
+            return None
+        if (
+            face_mesh_event.combined_eye_gaze_yaw is None
+            or face_mesh_event.combined_eye_gaze_pitch is None
+            or face_mesh_event.head_yaw is None
+            or face_mesh_event.head_pitch is None
+            or face_mesh_event.camera_x is None
+            or face_mesh_event.camera_y is None
+            or face_mesh_event.camera_z is None
+        ):
+            return None
 
         try:
             calibrated_event = CalibratedFaceAndGazeEvent(
@@ -152,6 +272,26 @@ class CalibrationAdapterStep:
                 pitch_calibration=self.pitch_calibration,
                 yaw_calibration=self.yaw_calibration,
                 roll_calibration=self.roll_calibration,
+                face_center_yaw=self.face_center_yaw,
+                face_center_pitch=self.face_center_pitch,
+                center_zeta=self.center_zeta,
+                matrix_yaw_yaw=self.matrix_yaw_yaw,
+                matrix_yaw_pitch=self.matrix_yaw_pitch,
+                matrix_pitch_yaw=self.matrix_pitch_yaw,
+                matrix_pitch_pitch=self.matrix_pitch_pitch,
+                face_center_x=self.face_center_x,
+                face_center_y=self.face_center_y,
+                face_center_z=self.face_center_z,
+                screen_center_cam_x=self.screen_center_cam_x,
+                screen_center_cam_y=self.screen_center_cam_y,
+                screen_center_cam_z=self.screen_center_cam_z,
+                screen_axis_x_x=self.screen_axis_x_x,
+                screen_axis_x_y=self.screen_axis_x_y,
+                screen_axis_x_z=self.screen_axis_x_z,
+                screen_axis_y_x=self.screen_axis_y_x,
+                screen_axis_y_y=self.screen_axis_y_y,
+                screen_axis_y_z=self.screen_axis_y_z,
+                screen_fit_rmse=self.screen_fit_rmse,
                 display_width=self.display_width,
                 display_height=self.display_height,
                 origin_x=self.origin_x,
@@ -310,50 +450,59 @@ class OverlayStep:
             return None
 
         try:
-            # Get face mesh event from calibrated event
             face_event = calibrated_event.face_mesh_event
 
-            # Extract head angles from face event
-            head_yaw = (
-                face_event.head_yaw
-                if face_event and face_event.head_yaw is not None
-                else 0.0
-            )
-            head_pitch = (
-                face_event.head_pitch
-                if face_event and face_event.head_pitch is not None
-                else 0.0
-            )
-
-            # Calculate gaze coordinates
-            # Using display geometry from calibrated_event
-            center_x = calibrated_event.origin_x
-            center_y = calibrated_event.origin_y
-
-            # Calculate gaze position (combined head + calibrated angles)
-            # Coordinate System Convention (from overlay.py):
-            # +yaw moves left, +pitch moves up (negative screen Y)
-            gaze_x = center_x - head_yaw * self.SCALE
-            gaze_y = center_y - head_pitch * self.SCALE
-
-            # Clamp to frame boundaries
             frame_height, frame_width = frame.shape[:2]
-            gaze_x = max(
-                self.DOT_RADIUS + 2, min(frame_width - self.DOT_RADIUS - 2, gaze_x)
+            runtime_evt = {
+                "head_yaw": face_event.head_yaw if face_event else None,
+                "head_pitch": face_event.head_pitch if face_event else None,
+                "head_x": face_event.camera_x if face_event else None,
+                "head_y": face_event.camera_y if face_event else None,
+                "head_z": face_event.camera_z if face_event else None,
+                "raw_combined_eye_gaze_yaw": (
+                    face_event.combined_eye_gaze_yaw if face_event else None
+                ),
+                "raw_combined_eye_gaze_pitch": (
+                    face_event.combined_eye_gaze_pitch if face_event else None
+                ),
+                "face_delta_yaw": calibrated_event.face_delta_yaw,
+                "face_delta_pitch": calibrated_event.face_delta_pitch,
+                "corrected_eye_yaw": calibrated_event.corrected_eye_yaw,
+                "corrected_eye_pitch": calibrated_event.corrected_eye_pitch,
+                "corrected_yaw": calibrated_event.corrected_yaw,
+                "corrected_pitch": calibrated_event.corrected_pitch,
+                "corrected_yaw_linear": calibrated_event.corrected_yaw_linear,
+                "corrected_pitch_linear": calibrated_event.corrected_pitch_linear,
+                "corrected_screen_x": calibrated_event.corrected_screen_x,
+                "corrected_screen_y": calibrated_event.corrected_screen_y,
+                "origin_x": calibrated_event.origin_x,
+                "origin_y": calibrated_event.origin_y,
+                "center_zeta": calibrated_event.center_zeta,
+                "screen_center_cam_x": calibrated_event.screen_center_cam_x,
+                "screen_center_cam_y": calibrated_event.screen_center_cam_y,
+                "screen_center_cam_z": calibrated_event.screen_center_cam_z,
+                "screen_axis_x_x": calibrated_event.screen_axis_x_x,
+                "screen_axis_x_y": calibrated_event.screen_axis_x_y,
+                "screen_axis_x_z": calibrated_event.screen_axis_x_z,
+                "screen_axis_y_x": calibrated_event.screen_axis_y_x,
+                "screen_axis_y_y": calibrated_event.screen_axis_y_y,
+                "screen_axis_y_z": calibrated_event.screen_axis_y_z,
+                "screen_fit_rmse": calibrated_event.screen_fit_rmse,
+            }
+            primitives = collect_gaze_primitives(
+                runtime_evt,
+                frame_width,
+                frame_height,
+                origin_x=calibrated_event.origin_x,
+                origin_y=calibrated_event.origin_y,
             )
-            gaze_y = max(
-                self.DOT_RADIUS + 2, min(frame_height - self.DOT_RADIUS - 2, gaze_y)
+            draw_gaze_primitives_cv2(
+                frame,
+                primitives,
+                radius=self.DOT_RADIUS,
+                outline_thickness=2,
             )
 
-            # Draw gaze dot with white ring
-            cv2.circle(
-                frame, (int(gaze_x), int(gaze_y)), self.DOT_RADIUS, self.BLUE, -1
-            )
-            cv2.circle(
-                frame, (int(gaze_x), int(gaze_y)), self.DOT_RADIUS + 2, self.WHITE, 2
-            )
-
-            # Draw HUD if enabled
             if self.show_hud:
                 self._draw_hud(frame, face_event, calibrated_event)
 
@@ -378,7 +527,6 @@ class OverlayStep:
         """
         frame_height, frame_width = frame.shape[:2]
 
-        # HUD text
         has_face = face_event.has_face if face_event else False
         head_yaw = (
             face_event.head_yaw
@@ -391,11 +539,15 @@ class OverlayStep:
             else 0.0
         )
         roll = face_event.roll if face_event and face_event.roll is not None else 0.0
+        corrected_yaw = calibrated_event.corrected_yaw
+        corrected_pitch = calibrated_event.corrected_pitch
 
         lines = [
             f"FACE: {'YES' if has_face else 'NO'}",
-            f"Pitch: {head_pitch:.1f}",
-            f"Yaw: {head_yaw:.1f}",
+            f"Head Pitch: {head_pitch:.1f}",
+            f"Head Yaw: {head_yaw:.1f}",
+            f"Corrected Pitch: {corrected_pitch:.1f}",
+            f"Corrected Yaw: {corrected_yaw:.1f}",
             f"Roll: {roll:.1f}",
         ]
 
@@ -523,7 +675,6 @@ class UDPForwardStep:
         """
         face_event = event.face_mesh_event
 
-        # Extract head pose values
         head_yaw = (
             float(face_event.head_yaw)
             if face_event and face_event.head_yaw is not None
@@ -540,11 +691,21 @@ class UDPForwardStep:
             else 0.0
         )
 
-        # Calculate calibrated values (head pose + calibration)
-        calibrated_yaw = head_yaw + event.yaw_calibration
-        calibrated_pitch = head_pitch + event.pitch_calibration
+        corrected_yaw = float(event.corrected_yaw)
+        corrected_pitch = float(event.corrected_pitch)
+        corrected_eye_yaw = float(event.corrected_eye_yaw)
+        corrected_eye_pitch = float(event.corrected_eye_pitch)
+        face_delta_yaw = float(event.face_delta_yaw)
+        face_delta_pitch = float(event.face_delta_pitch)
+        corrected_screen_x = event.corrected_screen_x
+        corrected_screen_y = event.corrected_screen_y
+        raw_eye_yaw = (
+            float(event.raw_eye_yaw) if event.raw_eye_yaw is not None else 0.0
+        )
+        raw_eye_pitch = (
+            float(event.raw_eye_pitch) if event.raw_eye_pitch is not None else 0.0
+        )
 
-        # Extract data from events
         data = {
             "timestamp_ms": face_event.ts if face_event else 0,
             "has_face": face_event.has_face if face_event else False,
@@ -552,15 +713,37 @@ class UDPForwardStep:
             "head_yaw": head_yaw,
             "head_pitch": head_pitch,
             "roll": roll,
+            "raw_eye_yaw": raw_eye_yaw,
+            "raw_eye_pitch": raw_eye_pitch,
+            "face_center_yaw": float(event.face_center_yaw),
+            "face_center_pitch": float(event.face_center_pitch),
+            "face_delta_yaw": face_delta_yaw,
+            "face_delta_pitch": face_delta_pitch,
+            "matrix_yaw_yaw": float(event.matrix_yaw_yaw),
+            "matrix_yaw_pitch": float(event.matrix_yaw_pitch),
+            "matrix_pitch_yaw": float(event.matrix_pitch_yaw),
+            "matrix_pitch_pitch": float(event.matrix_pitch_pitch),
             "pitch_calibration": float(event.pitch_calibration),
             "yaw_calibration": float(event.yaw_calibration),
             "roll_calibration": float(event.roll_calibration),
+            "corrected_eye_yaw": corrected_eye_yaw,
+            "corrected_eye_pitch": corrected_eye_pitch,
             "display_width": event.display_width,
             "display_height": event.display_height,
             "origin_x": float(event.origin_x),
             "origin_y": float(event.origin_y),
-            "calibrated_yaw": calibrated_yaw,
-            "calibrated_pitch": calibrated_pitch,
+            "calibrated_yaw": corrected_yaw,
+            "calibrated_pitch": corrected_pitch,
+            "calibrated_screen_x": (
+                float(corrected_screen_x)
+                if corrected_screen_x is not None
+                else None
+            ),
+            "calibrated_screen_y": (
+                float(corrected_screen_y)
+                if corrected_screen_y is not None
+                else None
+            ),
         }
 
         return json.dumps(data)

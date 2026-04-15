@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Harmonization Capture Script
-Captures raw FaceMesh data for specific head and eye movements to analyze coordinate systems.
+Yaw Correlation Capture Script
+Captures raw FaceMesh data for head and eye yaw combinations to analyze eye yaw consistency.
 """
 
 import argparse
@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
 
@@ -20,13 +20,6 @@ import cv2
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
-
-sys.path.insert(0, str(Path(__file__).parent / "src"))
-from facemesh_app.harmonization_contract import (
-    HARMONIZATION_PROMPTS,
-    HARMONIZATION_SCHEMA_VERSION,
-    HARMONIZATION_TEST_CASE,
-)
 
 
 def safe_float(v, fallback=0.0):
@@ -40,7 +33,7 @@ def safe_float(v, fallback=0.0):
 # Constants
 MODEL_PATH = Path("face_landmarker.task")
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
-OUTPUT_DIR = Path("harmonization_data")
+OUTPUT_DIR = Path("yaw_correlation")
 
 # Colors
 WHITE = (255, 255, 255)
@@ -51,7 +44,66 @@ HUD_BG = (20, 20, 20)
 HUD_BORDER = (230, 230, 230)
 HUD_TEXT = (245, 245, 245)
 
-PROMPTS = HARMONIZATION_PROMPTS
+LEFT_EYE_LANDMARKS = (33, 133, 145, 159, 468, 469, 470, 471, 472)
+RIGHT_EYE_LANDMARKS = (263, 362, 374, 386, 473, 474, 475, 476, 477)
+NOSE_BRIDGE_IDX = 168
+NOSE_BASE_IDX = 2
+LEFT_IRIS_CENTER_IDX = 468
+RIGHT_IRIS_CENTER_IDX = 473
+
+# 9 prompts to capture: 3 head positions x 3 eye positions
+# Head positions: left, center, right
+# Eye positions: left, center, right
+PROMPTS = [
+    # Head LEFT row
+    {
+        "name": "head-left-eye-left",
+        "instruction": "Turn your HEAD LEFT and look with your EYES LEFT",
+        "type": "combined",
+    },
+    {
+        "name": "head-left-eye-center",
+        "instruction": "Turn your HEAD LEFT and look with your EYES STRAIGHT AHEAD",
+        "type": "combined",
+    },
+    {
+        "name": "head-left-eye-right",
+        "instruction": "Turn your HEAD LEFT and look with your EYES RIGHT",
+        "type": "combined",
+    },
+    # Head CENTER row
+    {
+        "name": "head-center-eye-left",
+        "instruction": "Keep your HEAD CENTERED and look with your EYES LEFT",
+        "type": "combined",
+    },
+    {
+        "name": "head-center-eye-center",
+        "instruction": "Keep your HEAD CENTERED and look with your EYES STRAIGHT AHEAD",
+        "type": "combined",
+    },
+    {
+        "name": "head-center-eye-right",
+        "instruction": "Keep your HEAD CENTERED and look with your EYES RIGHT",
+        "type": "combined",
+    },
+    # Head RIGHT row
+    {
+        "name": "head-right-eye-left",
+        "instruction": "Turn your HEAD RIGHT and look with your EYES LEFT",
+        "type": "combined",
+    },
+    {
+        "name": "head-right-eye-center",
+        "instruction": "Turn your HEAD RIGHT and look with your EYES STRAIGHT AHEAD",
+        "type": "combined",
+    },
+    {
+        "name": "head-right-eye-right",
+        "instruction": "Turn your HEAD RIGHT and look with your EYES RIGHT",
+        "type": "combined",
+    },
+]
 
 
 def ensure_model():
@@ -142,6 +194,68 @@ def draw_text_with_background(
         thickness,
         cv2.LINE_AA,
     )
+
+
+def _nose_plane_reference(
+    bridge_xy: Tuple[float, float],
+    base_xy: Tuple[float, float],
+    left_iris_xy: Tuple[float, float],
+    right_iris_xy: Tuple[float, float],
+) -> Optional[Dict[str, Any]]:
+    bx, by = bridge_xy
+    nbx, nby = base_xy
+    axis_x = nbx - bx
+    axis_y = nby - by
+    axis_len = math.hypot(axis_x, axis_y)
+    if axis_len <= 1e-9:
+        return None
+
+    n_hat_x = axis_x / axis_len
+    n_hat_y = axis_y / axis_len
+    p_hat_x = -n_hat_y
+    p_hat_y = n_hat_x
+
+    lx, ly = left_iris_xy
+    rx, ry = right_iris_xy
+    eye_span = math.hypot(rx - lx, ry - ly)
+    if eye_span <= 1e-9:
+        return None
+
+    def point_projection(ix: float, iy: float) -> Dict[str, float]:
+        dx = ix - bx
+        dy = iy - by
+        signed = dx * n_hat_x + dy * n_hat_y
+        along_perp = dx * p_hat_x + dy * p_hat_y
+        proj_x = bx + along_perp * p_hat_x
+        proj_y = by + along_perp * p_hat_y
+        return {
+            "signed": signed,
+            "alongPerp": along_perp,
+            "projX": proj_x,
+            "projY": proj_y,
+        }
+
+    left_proj = point_projection(lx, ly)
+    right_proj = point_projection(rx, ry)
+    avg_signed = 0.5 * (left_proj["signed"] + right_proj["signed"])
+
+    return {
+        "axisLength": axis_len,
+        "eyeSpan": eye_span,
+        "nHatX": n_hat_x,
+        "nHatY": n_hat_y,
+        "pHatX": p_hat_x,
+        "pHatY": p_hat_y,
+        "leftSigned": left_proj["signed"],
+        "rightSigned": right_proj["signed"],
+        "avgSigned": avg_signed,
+        "leftProjX": left_proj["projX"],
+        "leftProjY": left_proj["projY"],
+        "rightProjX": right_proj["projX"],
+        "rightProjY": right_proj["projY"],
+        "leftAlongPerp": left_proj["alongPerp"],
+        "rightAlongPerp": right_proj["alongPerp"],
+    }
 
 
 def serialize_mediapipe_result(result) -> Dict[str, Any]:
@@ -272,6 +386,93 @@ def serialize_mediapipe_result(result) -> Dict[str, Any]:
             pass
         return None
 
+    def extract_eye_geometry(face_landmarks):
+        def get_point(idx):
+            if (
+                face_landmarks is None
+                or idx < 0
+                or idx >= len(face_landmarks)
+                or face_landmarks[idx] is None
+            ):
+                return None
+            point = face_landmarks[idx]
+            x = safe_float(point.get("x"), float("nan"))
+            y = safe_float(point.get("y"), float("nan"))
+            z = safe_float(point.get("z"), float("nan"))
+            if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(z)):
+                return None
+            return {
+                "x": x,
+                "y": y,
+                "z": z,
+            }
+
+        def get_xy(idx):
+            point = get_point(idx)
+            if point is None:
+                return None
+            return point["x"], point["y"]
+
+        def nose_reference():
+            bridge = get_xy(NOSE_BRIDGE_IDX)
+            base = get_xy(NOSE_BASE_IDX)
+            left_iris = get_xy(LEFT_IRIS_CENTER_IDX)
+            right_iris = get_xy(RIGHT_IRIS_CENTER_IDX)
+            if (
+                bridge is None
+                or base is None
+                or left_iris is None
+                or right_iris is None
+            ):
+                return None
+
+            ref = _nose_plane_reference(bridge, base, left_iris, right_iris)
+            if ref is None:
+                return None
+
+            return {
+                "bridge": get_point(NOSE_BRIDGE_IDX),
+                "base": get_point(NOSE_BASE_IDX),
+                "bridgeToBaseUnit": {"x": ref["nHatX"], "y": ref["nHatY"]},
+                "perpendicularAtBridgeUnit": {"x": ref["pHatX"], "y": ref["pHatY"]},
+                "bridgeToBaseLengthNorm": ref["axisLength"],
+                "eyeSpanNorm": ref["eyeSpan"],
+                "leftIrisToPerpendicularSignedNorm": ref["leftSigned"],
+                "rightIrisToPerpendicularSignedNorm": ref["rightSigned"],
+                "avgIrisToPerpendicularSignedNorm": ref["avgSigned"],
+                "leftIrisToPerpendicularByEyeSpan": ref["leftSigned"] / ref["eyeSpan"],
+                "rightIrisToPerpendicularByEyeSpan": ref["rightSigned"]
+                / ref["eyeSpan"],
+                "avgIrisToPerpendicularByEyeSpan": ref["avgSigned"] / ref["eyeSpan"],
+                "leftIrisPerpendicularFoot": {
+                    "x": ref["leftProjX"],
+                    "y": ref["leftProjY"],
+                },
+                "rightIrisPerpendicularFoot": {
+                    "x": ref["rightProjX"],
+                    "y": ref["rightProjY"],
+                },
+            }
+
+        geometry = {
+            "leftEye": {
+                "irisCenter": get_point(LEFT_IRIS_CENTER_IDX),
+                "innerCanthus": get_point(133),
+                "outerCanthus": get_point(33),
+                "upperEyelid": get_point(159),
+                "lowerEyelid": get_point(145),
+            },
+            "rightEye": {
+                "irisCenter": get_point(RIGHT_IRIS_CENTER_IDX),
+                "innerCanthus": get_point(362),
+                "outerCanthus": get_point(263),
+                "upperEyelid": get_point(386),
+                "lowerEyelid": get_point(374),
+            },
+        }
+        geometry["noseReference"] = nose_reference()
+        return geometry
+
     def serialize_blendshapes(blendshapes):
         if blendshapes is None:
             return None
@@ -306,6 +507,7 @@ def serialize_mediapipe_result(result) -> Dict[str, Any]:
         if fl and len(fl) > 0:
             # MediaPipe returns a list, one per face detected
             data["face_landmarks"] = serialize_landmarks(fl[0])
+            data["eye_geometry"] = extract_eye_geometry(data["face_landmarks"])
         else:
             print(f"Warning: No face landmarks found in result")
 
@@ -318,44 +520,137 @@ def serialize_mediapipe_result(result) -> Dict[str, Any]:
     return data
 
 
+def _landmark_to_px(landmark, width: int, height: int) -> Tuple[int, int]:
+    x = int(round(safe_float(getattr(landmark, "x", 0.0)) * width))
+    y = int(round(safe_float(getattr(landmark, "y", 0.0)) * height))
+    x = max(0, min(width - 1, x))
+    y = max(0, min(height - 1, y))
+    return x, y
+
+
+def _draw_eye_landmarks(frame, result) -> Optional[Dict[str, float]]:
+    if result is None or not getattr(result, "face_landmarks", None):
+        return None
+    face_landmarks = result.face_landmarks[0]
+    if face_landmarks is None:
+        return None
+
+    h, w = frame.shape[:2]
+
+    def draw_index(idx: int, color: Tuple[int, int, int], radius: int) -> None:
+        if idx < 0 or idx >= len(face_landmarks):
+            return
+        point = _landmark_to_px(face_landmarks[idx], w, h)
+        cv2.circle(frame, point, radius + 1, WHITE, -1, cv2.LINE_AA)
+        cv2.circle(frame, point, radius, color, -1, cv2.LINE_AA)
+
+    for idx in LEFT_EYE_LANDMARKS:
+        draw_index(idx, (0, 165, 255), 3 if idx == 468 else 2)
+    for idx in RIGHT_EYE_LANDMARKS:
+        draw_index(idx, (255, 220, 40), 3 if idx == 473 else 2)
+
+    def get_px(idx: int):
+        if idx < 0 or idx >= len(face_landmarks):
+            return None
+        return _landmark_to_px(face_landmarks[idx], w, h)
+
+    bridge = get_px(NOSE_BRIDGE_IDX)
+    base = get_px(NOSE_BASE_IDX)
+    left_iris = get_px(LEFT_IRIS_CENTER_IDX)
+    right_iris = get_px(RIGHT_IRIS_CENTER_IDX)
+    if bridge is None or base is None:
+        return None
+
+    cv2.circle(frame, bridge, 6, WHITE, -1, cv2.LINE_AA)
+    cv2.circle(frame, bridge, 4, RED, -1, cv2.LINE_AA)
+    cv2.circle(frame, base, 6, WHITE, -1, cv2.LINE_AA)
+    cv2.circle(frame, base, 4, YELLOW, -1, cv2.LINE_AA)
+
+    if left_iris is None or right_iris is None:
+        return None
+
+    bridge_f = (float(bridge[0]), float(bridge[1]))
+    base_f = (float(base[0]), float(base[1]))
+    left_f = (float(left_iris[0]), float(left_iris[1]))
+    right_f = (float(right_iris[0]), float(right_iris[1]))
+    ref = _nose_plane_reference(bridge_f, base_f, left_f, right_f)
+    if ref is None:
+        return None
+
+    cv2.line(frame, bridge, base, WHITE, 4, cv2.LINE_AA)
+    cv2.line(frame, bridge, base, RED, 2, cv2.LINE_AA)
+
+    half_len = int(max(90.0, ref["eyeSpan"] * 2.5))
+    p1 = (
+        int(round(bridge_f[0] - ref["pHatX"] * half_len)),
+        int(round(bridge_f[1] - ref["pHatY"] * half_len)),
+    )
+    p2 = (
+        int(round(bridge_f[0] + ref["pHatX"] * half_len)),
+        int(round(bridge_f[1] + ref["pHatY"] * half_len)),
+    )
+    cv2.line(frame, p1, p2, WHITE, 4, cv2.LINE_AA)
+    cv2.line(frame, p1, p2, GREEN, 2, cv2.LINE_AA)
+
+    left_proj = (int(round(ref["leftProjX"])), int(round(ref["leftProjY"])))
+    right_proj = (int(round(ref["rightProjX"])), int(round(ref["rightProjY"])))
+    cv2.line(frame, left_iris, left_proj, WHITE, 3, cv2.LINE_AA)
+    cv2.line(frame, left_iris, left_proj, (0, 165, 255), 1, cv2.LINE_AA)
+    cv2.line(frame, right_iris, right_proj, WHITE, 3, cv2.LINE_AA)
+    cv2.line(frame, right_iris, right_proj, (255, 220, 40), 1, cv2.LINE_AA)
+    cv2.circle(frame, left_proj, 3, WHITE, -1, cv2.LINE_AA)
+    cv2.circle(frame, right_proj, 3, WHITE, -1, cv2.LINE_AA)
+
+    axis_angle = math.degrees(math.atan2(ref["nHatY"], ref["nHatX"]))
+
+    return {
+        "leftSignedPx": ref["leftSigned"],
+        "rightSignedPx": ref["rightSigned"],
+        "avgSignedPx": ref["avgSigned"],
+        "bridgeToBasePx": ref["axisLength"],
+        "eyeSpanPx": ref["eyeSpan"],
+        "avgByEyeSpan": ref["avgSigned"] / ref["eyeSpan"],
+        "axisAngleDeg": axis_angle,
+    }
+
+
 @dataclass
-class HarmonizationPoint:
-    """Data captured for a single harmonization point."""
+class YawCorrelationPoint:
+    """Data captured for a single yaw correlation point."""
 
     name: str
     instruction: str
-    movement_type: str
-    movement_axis: str
-    movement_direction: str
+    head_position: str  # 'left', 'center', 'right'
+    eye_position: str  # 'left', 'center', 'right'
     timestamp_ms: int
-    raw_result: Dict[str, Any]
+    raw_result: Dict[str, Any]  # Serialized MediaPipe result
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return {
             "name": self.name,
             "instruction": self.instruction,
-            "movementType": self.movement_type,
-            "movementAxis": self.movement_axis,
-            "movementDirection": self.movement_direction,
+            "headPosition": self.head_position,
+            "eyePosition": self.eye_position,
             "timestampMs": self.timestamp_ms,
             "rawResult": self.raw_result,
         }
 
 
-class HarmonizationCapture:
-    """Main harmonization capture class."""
+class YawCorrelationCapture:
+    """Main yaw correlation capture class."""
 
     def __init__(self, camera_index: int = 0):
         self.camera_index = camera_index
         self.cap = None
         self.landmarker = None
-        self.captured_data: List[HarmonizationPoint] = []
+        self.captured_data: List[YawCorrelationPoint] = []
         self.current_prompt_index = 0
         self.running = False
         self.mouse_clicked = False
         self.mouse_pos = (0, 0)
         self.last_result = None
+        self.last_nose_reference = None
 
         # Create output directory
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -390,33 +685,46 @@ class HarmonizationCapture:
 
         # Semi-transparent overlay at top
         overlay = frame.copy()
-        cv2.rectangle(overlay, (0, 0), (w, 200), HUD_BG, -1)
+        cv2.rectangle(overlay, (0, 0), (w, 220), HUD_BG, -1)
         frame = cv2.addWeighted(overlay, 0.9, frame, 0.1, 0)
 
         # Progress indicator
         progress_text = f"Progress: {progress + 1}/{total}"
         draw_text_with_background(frame, progress_text, (30, 40), font_scale=0.8)
 
+        # Parse head and eye positions from name
+        name_parts = prompt["name"].split("-")
+        head_pos = name_parts[1].upper()
+        eye_pos = name_parts[3].upper()
+
+        # Position indicators
+        pos_text = f"Head: {head_pos} | Eyes: {eye_pos}"
+        cv2.putText(
+            frame,
+            pos_text,
+            (30, 70),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            YELLOW,
+            2,
+            cv2.LINE_AA,
+        )
+
         # Main instruction
         instruction = prompt["instruction"]
         draw_text_with_background(
-            frame,
-            instruction,
-            (30, 100),
-            font_scale=1.2,
-            bg_color=(40, 80, 40) if prompt["type"] == "head" else (80, 60, 40),
+            frame, instruction, (30, 115), font_scale=1.0, bg_color=(60, 60, 80)
         )
 
         # Type indicator
-        type_text = f"Type: {prompt['type'].upper()} movement"
-        color = GREEN if prompt["type"] == "head" else YELLOW
+        type_text = "YAW CORRELATION TEST"
         cv2.putText(
             frame,
             type_text,
-            (30, 160),
+            (30, 180),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.8,
-            color,
+            GREEN,
             2,
             cv2.LINE_AA,
         )
@@ -426,7 +734,7 @@ class HarmonizationCapture:
         cv2.putText(
             frame,
             click_text,
-            (30, 190),
+            (30, 210),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
             WHITE,
@@ -453,21 +761,55 @@ class HarmonizationCapture:
                 cv2.LINE_AA,
             )
 
+        if isinstance(self.last_nose_reference, dict):
+            left_h = safe_float(self.last_nose_reference.get("leftSignedPx"), 0.0)
+            right_h = safe_float(self.last_nose_reference.get("rightSignedPx"), 0.0)
+            avg_h = safe_float(self.last_nose_reference.get("avgSignedPx"), 0.0)
+            norm_h = safe_float(self.last_nose_reference.get("avgByEyeSpan"), 0.0)
+            axis_deg = safe_float(self.last_nose_reference.get("axisAngleDeg"), 0.0)
+            x0 = max(30, w - 620)
+            cv2.putText(
+                frame,
+                f"Iris->perp signed(px) L:{left_h:+.1f} R:{right_h:+.1f} A:{avg_h:+.1f}",
+                (x0, 78),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.62,
+                YELLOW,
+                2,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                frame,
+                f"Norm(A/eyeSpan): {norm_h:+.3f}   Nose-axis: {axis_deg:+.1f} deg",
+                (x0, 104),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                WHITE,
+                1,
+                cv2.LINE_AA,
+            )
+
         return frame
 
-    def capture_point(self, prompt: Dict[str, Any]) -> Optional[HarmonizationPoint]:
-        """Capture a single harmonization point."""
+    def capture_point(self, prompt: Dict[str, Any]) -> Optional[YawCorrelationPoint]:
+        """Capture a single yaw correlation point."""
         self.mouse_clicked = False
+
+        # Parse positions from name
+        name_parts = prompt["name"].split("-")
+        head_position = name_parts[1]
+        eye_position = name_parts[3]
 
         print(f"\n{'=' * 60}")
         print(f"CAPTURE {self.current_prompt_index + 1}/{len(PROMPTS)}")
         print(f"Instruction: {prompt['instruction']}")
-        print(f"Type: {prompt['type']}")
+        print(f"Head position: {head_position}")
+        print(f"Eye position: {eye_position}")
         print(f"Click or press SPACE to capture...")
         print(f"{'=' * 60}\n")
 
-        cv2.namedWindow("Harmonization Capture")
-        cv2.setMouseCallback("Harmonization Capture", self.mouse_callback)
+        cv2.namedWindow("Yaw Correlation Capture")
+        cv2.setMouseCallback("Yaw Correlation Capture", self.mouse_callback)
 
         while self.running:
             # Read frame
@@ -485,13 +827,15 @@ class HarmonizationCapture:
             result = self.landmarker.detect(mp_image)
             self.last_result = result
 
+            self.last_nose_reference = _draw_eye_landmarks(frame_bgr, result)
+
             # Draw UI
             frame_with_ui = self.draw_ui(
                 frame_bgr.copy(), prompt, self.current_prompt_index, len(PROMPTS)
             )
 
             # Display
-            cv2.imshow("Harmonization Capture", frame_with_ui)
+            cv2.imshow("Yaw Correlation Capture", frame_with_ui)
 
             # Check for capture trigger
             key = cv2.waitKey(1) & 0xFF
@@ -502,13 +846,12 @@ class HarmonizationCapture:
                 # Serialize the result
                 raw_data = serialize_mediapipe_result(result)
 
-                # Create harmonization point
-                point = HarmonizationPoint(
+                # Create yaw correlation point
+                point = YawCorrelationPoint(
                     name=prompt["name"],
                     instruction=prompt["instruction"],
-                    movement_type=prompt["type"],
-                    movement_axis=prompt.get("axis", ""),
-                    movement_direction=prompt.get("direction", ""),
+                    head_position=head_position,
+                    eye_position=eye_position,
                     timestamp_ms=int(time.time() * 1000),
                     raw_result=raw_data,
                 )
@@ -536,15 +879,20 @@ class HarmonizationCapture:
         return point
 
     def run(self):
-        """Run the harmonization capture session."""
+        """Run the yaw correlation capture session."""
         print("\n" + "=" * 60)
-        print("HARMONIZATION CAPTURE")
+        print("YAW CORRELATION CAPTURE")
         print("=" * 60)
-        print("\nThis script will capture FaceMesh data for 8 different")
-        print("head and eye movements to help analyze coordinate systems.")
+        print("\nThis script will capture FaceMesh data for 9 different")
+        print("combinations of head and eye positions to analyze")
+        print("eye yaw consistency across head positions.")
+        print("\nTest pattern:")
+        print("  3 head positions (LEFT, CENTER, RIGHT)")
+        print("  x 3 eye positions (LEFT, CENTER, RIGHT)")
+        print("  = 9 capture points")
         print("\nInstructions:")
-        print("- Follow each prompt to move your head or eyes")
-        print("- Keep the movement steady when instructed")
+        print("- Follow each prompt carefully")
+        print("- Keep the position steady when instructed")
         print("- Click anywhere or press SPACE to capture")
         print("- Press 'q' or ESC to quit early")
         print("\n" + "=" * 60 + "\n")
@@ -568,15 +916,11 @@ class HarmonizationCapture:
 
             # Save all data to a combined file
             if self.captured_data:
-                combined_file = OUTPUT_DIR / "harmonization_combined.json"
+                combined_file = OUTPUT_DIR / "yaw_correlation_combined.json"
                 combined_data = {
-                    "schemaVersion": HARMONIZATION_SCHEMA_VERSION,
-                    "suite": "harmonization",
                     "timestamp": int(time.time() * 1000),
                     "captureCount": len(self.captured_data),
                     "cameraInfo": self.camera_info,
-                    "prompts": PROMPTS,
-                    "testCase": HARMONIZATION_TEST_CASE,
                     "points": [p.to_dict() for p in self.captured_data],
                 }
 
@@ -586,7 +930,7 @@ class HarmonizationCapture:
                 print(f"\nCombined data saved: {combined_file}")
 
             print(f"\n{'=' * 60}")
-            print(f"Harmonization capture complete!")
+            print(f"Yaw correlation capture complete!")
             print(f"Captured {len(self.captured_data)} points")
             print(f"Data saved to: {OUTPUT_DIR.absolute()}")
             print(f"{'=' * 60}\n")
@@ -602,14 +946,14 @@ class HarmonizationCapture:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Harmonization capture for FaceMesh coordinate system analysis"
+        description="Yaw correlation capture for FaceMesh eye yaw consistency analysis"
     )
     parser.add_argument(
         "--camera-index", type=int, default=0, help="Camera index (default: 0)"
     )
     args = parser.parse_args()
 
-    capture = HarmonizationCapture(camera_index=args.camera_index)
+    capture = YawCorrelationCapture(camera_index=args.camera_index)
     capture.run()
 
 

@@ -13,10 +13,10 @@ import cv2
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
-from .facemesh_dao import load_calibration
+from .calibration import load_calibration
 from .camera_reader import CameraReader
 from .frame_dispatcher import FrameDispatcher, ensure_model, MODEL_PATH
-from .overlay import OverlayManager, get_display_geo
+from .overlay_common import get_display_geo
 from .pipeline_steps import (
     FaceMeshStep,
     CalibrationAdapterStep,
@@ -75,8 +75,8 @@ def parse_args():
     parser.add_argument(
         "--overlay",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Show overlay window",
+        default=False,
+        help="Show transparent overlay window",
     )
     parser.add_argument(
         "--capture",
@@ -90,7 +90,13 @@ def parse_args():
         dest="capture_live",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Show live camera preview in capture mode",
+        help="Show live camera+mesh content in capture window",
+    )
+    parser.add_argument(
+        "--udp",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Forward calibrated output via UDP",
     )
     parser.add_argument("--quiet", action="store_true", help="Suppress output")
     parser.add_argument(
@@ -191,6 +197,8 @@ def main():
     )
 
     args = parse_args()
+    if args.capture_live:
+        args.capture = True
 
     calibration = None
     if not args.force_recalibrate and not args.calibrate and not args.calibration:
@@ -209,6 +217,7 @@ def main():
                 f"eye_zero=({calibration.center_yaw:.4f}, {calibration.center_pitch:.4f}) "
                 f"face_zero=({calibration.face_center_yaw:.4f}, {calibration.face_center_pitch:.4f}) "
                 f"zeta={calibration.center_zeta:.4f} "
+                f"screen_fit_rmse={calibration.screen_fit_rmse:.4f} "
                 f"samples={calibration.sample_count}",
             )
         else:
@@ -243,33 +252,70 @@ def main():
     pitch_calib = calibration.center_pitch if calibration else 0.0
     yaw_calib = calibration.center_yaw if calibration else 0.0
     roll_calib = 0.0
+    face_center_yaw = calibration.face_center_yaw if calibration else 0.0
+    face_center_pitch = calibration.face_center_pitch if calibration else 0.0
+    center_zeta = calibration.center_zeta if calibration else 1200.0
+    matrix_yaw_yaw = calibration.matrix_yaw_yaw if calibration else 1.0
+    matrix_yaw_pitch = calibration.matrix_yaw_pitch if calibration else 0.0
+    matrix_pitch_yaw = calibration.matrix_pitch_yaw if calibration else 0.0
+    matrix_pitch_pitch = calibration.matrix_pitch_pitch if calibration else 1.0
+    face_center_x = calibration.face_center_x if calibration else 0.0
+    face_center_y = calibration.face_center_y if calibration else 0.0
+    face_center_z = calibration.face_center_z if calibration else center_zeta
+    screen_center_cam_x = calibration.screen_center_cam_x if calibration else 0.0
+    screen_center_cam_y = calibration.screen_center_cam_y if calibration else 0.0
+    screen_center_cam_z = calibration.screen_center_cam_z if calibration else center_zeta
+    screen_axis_x_x = calibration.screen_axis_x_x if calibration else 1.0
+    screen_axis_x_y = calibration.screen_axis_x_y if calibration else 0.0
+    screen_axis_x_z = calibration.screen_axis_x_z if calibration else 0.0
+    screen_axis_y_x = calibration.screen_axis_y_x if calibration else 0.0
+    screen_axis_y_y = calibration.screen_axis_y_y if calibration else 1.0
+    screen_axis_y_z = calibration.screen_axis_y_z if calibration else 0.0
+    screen_fit_rmse = calibration.screen_fit_rmse if calibration else -1.0
     calibration_adapter_step = CalibrationAdapterStep(
         pitch_calibration=pitch_calib,
         yaw_calibration=yaw_calib,
         roll_calibration=roll_calib,
+        face_center_yaw=face_center_yaw,
+        face_center_pitch=face_center_pitch,
+        center_zeta=center_zeta,
+        matrix_yaw_yaw=matrix_yaw_yaw,
+        matrix_yaw_pitch=matrix_yaw_pitch,
+        matrix_pitch_yaw=matrix_pitch_yaw,
+        matrix_pitch_pitch=matrix_pitch_pitch,
+        face_center_x=face_center_x,
+        face_center_y=face_center_y,
+        face_center_z=face_center_z,
+        screen_center_cam_x=screen_center_cam_x,
+        screen_center_cam_y=screen_center_cam_y,
+        screen_center_cam_z=screen_center_cam_z,
+        screen_axis_x_x=screen_axis_x_x,
+        screen_axis_x_y=screen_axis_x_y,
+        screen_axis_x_z=screen_axis_x_z,
+        screen_axis_y_x=screen_axis_y_x,
+        screen_axis_y_y=screen_axis_y_y,
+        screen_axis_y_z=screen_axis_y_z,
+        screen_fit_rmse=screen_fit_rmse,
         display_width=display["width"],
         display_height=display["height"],
         origin_x=float(display["width"]) / 2.0,
         origin_y=float(display["height"]) / 2.0,
     )
 
-    capture_step = CaptureStep(enabled=args.capture)
+    capture_step = CaptureStep(enabled=False)
 
-    overlay_step = OverlayStep(enabled=args.overlay, show_hud=True)
+    overlay_step = OverlayStep(enabled=False, show_hud=False)
 
-    udp_forward_step = UDPForwardStep(host=args.udp_host, port=args.udp_port)
-
-    overlay_manager = OverlayManager(
-        display=display,
-        capture_enabled=args.capture,
-        overlay_fps=args.overlay_fps,
-        calibration_mode=args.calibrate or args.calibration,
+    udp_forward_step = UDPForwardStep(
+        host=args.udp_host,
+        port=args.udp_port,
+        enabled=args.udp,
     )
 
     frame_dispatcher = FrameDispatcher(
         args,
         calibration=calibration,
-        overlay_manager=overlay_manager,
+        overlay_manager=None,
         state_machine=state_machine,
         face_mesh_step=face_mesh_step,
         calibration_adapter_step=calibration_adapter_step,
@@ -291,11 +337,21 @@ def main():
         camera_reader.open()
 
         if args.calibrate or args.calibration:
+            frame_dispatcher.start_calibration()
             logger.info("Running calibration workflow...")
             frame_dispatcher.run_calibration_workflow(camera_reader)
         else:
-            mode = "capture" if args.capture else "overlay"
-            logger.info(f"Running in {mode} mode...")
+            frame_dispatcher.start_operational()
+            active_modes = []
+            if args.capture:
+                active_modes.append("capture")
+            if args.overlay:
+                active_modes.append("overlay")
+            if args.udp:
+                active_modes.append("udp")
+            if not active_modes:
+                active_modes.append("tracking")
+            logger.info(f"Running in mode(s): {', '.join(active_modes)}")
             frame_dispatcher.run_capture_loop(camera_reader)
 
     except KeyboardInterrupt:

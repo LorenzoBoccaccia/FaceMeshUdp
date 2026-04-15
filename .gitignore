@@ -218,3 +218,4 @@ marimo/_lsp/
 __marimo__/
 harmonization_data/
 pitch_correlation/
+yaw_correlation/

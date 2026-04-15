@@ -3,26 +3,31 @@ FrameDispatcher module for FaceMesh application.
 Orchestrates the synchronous frame processing pipeline.
 """
 
+import json
 import logging
 import time
 import urllib.request
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple, Callable, Any
 
-import cv2
 import numpy as np
 
 from .facemesh_dao import (
     FaceMeshEvent,
+    safe_float,
+)
+from .calibration import (
+    CalibratedFaceAndGazeEvent,
     CalibrationMatrix,
     CalibrationPoint,
     compute_calibration_matrix,
     save_calibration,
-    load_calibration,
-    safe_float,
 )
 from .capture import save_test_capture, build_camera_capture_marked_image
-from .overlay import OverlayManager, get_display_geo
+from .capture_window import CaptureWindowManager
+from .overlay_calibration import CalibrationOverlayManager
+from .overlay_common import get_display_geo
+from .overlay_runtime import RuntimeOverlayManager
 from .state_machine import StateMachine, DispatcherState
 from .pipeline_steps import (
     FaceMeshStep,
@@ -36,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 MODEL_PATH = Path("face_landmarker.task")
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+CALIBRATION_DATA_DIR = Path("calibration_data")
 
 
 def ensure_model():
@@ -48,9 +54,10 @@ def ensure_model():
 
 
 def enrich_runtime_evt(
-    evt: Optional[FaceMeshEvent], screen_w: float, screen_h: float
+    evt: Optional[FaceMeshEvent],
+    calibrated_evt: Optional[CalibratedFaceAndGazeEvent] = None,
 ) -> Optional[Dict]:
-    """Build runtime event payload for overlay and capture rendering."""
+    """Build a runtime payload that mirrors downstream calibrated outputs."""
     if not evt:
         return None
 
@@ -67,7 +74,7 @@ def enrich_runtime_evt(
     if raw_left_pitch is not None and raw_right_pitch is not None:
         raw_combined_pitch = (raw_left_pitch + raw_right_pitch) / 2.0
 
-    return {
+    payload = {
         "type": evt.type,
         "hasFace": evt.has_face,
         "landmarkCount": evt.landmark_count,
@@ -75,6 +82,10 @@ def enrich_runtime_evt(
         "zeta": evt.zeta,
         "head_yaw": evt.head_yaw,
         "head_pitch": evt.head_pitch,
+        "head_x": evt.camera_x,
+        "head_y": evt.camera_y,
+        "head_z": evt.camera_z,
+        "head_raw_transform_z": evt.raw_transform_z,
         "raw_left_eye_gaze_yaw": raw_left_yaw,
         "raw_left_eye_gaze_pitch": raw_left_pitch,
         "raw_right_eye_gaze_yaw": raw_right_yaw,
@@ -82,6 +93,59 @@ def enrich_runtime_evt(
         "raw_combined_eye_gaze_yaw": raw_combined_yaw,
         "raw_combined_eye_gaze_pitch": raw_combined_pitch,
     }
+    if calibrated_evt is not None and evt.has_face:
+        corrected_yaw = calibrated_evt.corrected_yaw
+        corrected_pitch = calibrated_evt.corrected_pitch
+        corrected_screen_x = calibrated_evt.corrected_screen_x
+        corrected_screen_y = calibrated_evt.corrected_screen_y
+        overlay_x = (
+            float(corrected_screen_x) if corrected_screen_x is not None else None
+        )
+        overlay_y = (
+            float(corrected_screen_y) if corrected_screen_y is not None else None
+        )
+        payload["face_delta_yaw"] = calibrated_evt.face_delta_yaw
+        payload["face_delta_pitch"] = calibrated_evt.face_delta_pitch
+        payload["corrected_eye_yaw"] = calibrated_evt.corrected_eye_yaw
+        payload["corrected_eye_pitch"] = calibrated_evt.corrected_eye_pitch
+        payload["corrected_yaw"] = corrected_yaw
+        payload["corrected_pitch"] = corrected_pitch
+        payload["corrected_screen_x"] = corrected_screen_x
+        payload["corrected_screen_y"] = corrected_screen_y
+        payload["corrected_yaw_linear"] = calibrated_evt.corrected_yaw_linear
+        payload["corrected_pitch_linear"] = calibrated_evt.corrected_pitch_linear
+        payload["head_ref_x"] = calibrated_evt.head_ref_x
+        payload["head_ref_y"] = calibrated_evt.head_ref_y
+        payload["head_ref_z"] = calibrated_evt.head_ref_z
+        payload["origin_x"] = calibrated_evt.origin_x
+        payload["origin_y"] = calibrated_evt.origin_y
+        payload["display_width"] = calibrated_evt.display_width
+        payload["display_height"] = calibrated_evt.display_height
+        payload["center_eye_yaw"] = calibrated_evt.yaw_calibration
+        payload["center_eye_pitch"] = calibrated_evt.pitch_calibration
+        payload["face_center_yaw"] = calibrated_evt.face_center_yaw
+        payload["face_center_pitch"] = calibrated_evt.face_center_pitch
+        payload["face_center_x"] = calibrated_evt.face_center_x
+        payload["face_center_y"] = calibrated_evt.face_center_y
+        payload["face_center_z"] = calibrated_evt.face_center_z
+        payload["center_zeta"] = calibrated_evt.center_zeta
+        payload["matrix_yaw_yaw"] = calibrated_evt.matrix_yaw_yaw
+        payload["matrix_yaw_pitch"] = calibrated_evt.matrix_yaw_pitch
+        payload["matrix_pitch_yaw"] = calibrated_evt.matrix_pitch_yaw
+        payload["matrix_pitch_pitch"] = calibrated_evt.matrix_pitch_pitch
+        payload["screen_center_cam_x"] = calibrated_evt.screen_center_cam_x
+        payload["screen_center_cam_y"] = calibrated_evt.screen_center_cam_y
+        payload["screen_center_cam_z"] = calibrated_evt.screen_center_cam_z
+        payload["screen_axis_x_x"] = calibrated_evt.screen_axis_x_x
+        payload["screen_axis_x_y"] = calibrated_evt.screen_axis_x_y
+        payload["screen_axis_x_z"] = calibrated_evt.screen_axis_x_z
+        payload["screen_axis_y_x"] = calibrated_evt.screen_axis_y_x
+        payload["screen_axis_y_y"] = calibrated_evt.screen_axis_y_y
+        payload["screen_axis_y_z"] = calibrated_evt.screen_axis_y_z
+        payload["screen_fit_rmse"] = calibrated_evt.screen_fit_rmse
+        payload["overlay_x"] = overlay_x
+        payload["overlay_y"] = overlay_y
+    return payload
 
 
 class FrameDispatcher:
@@ -118,11 +182,11 @@ class FrameDispatcher:
         self.origin_y = 0.0
 
         self._latest_evt: Optional[FaceMeshEvent] = None
+        self._latest_calibrated_evt: Optional[CalibratedFaceAndGazeEvent] = None
 
     def start(self):
         """Initialize display geometry."""
-        if self.overlay_manager is not None:
-            self.display = get_display_geo()
+        self.display = get_display_geo()
         self.running = True
 
     def stop(self):
@@ -140,110 +204,314 @@ class FrameDispatcher:
         self._latest_evt = evt
         return evt
 
+    def _run_pipeline_steps(
+        self,
+        frame: np.ndarray,
+        evt: Optional[FaceMeshEvent],
+        run_downstream: bool = True,
+    ) -> Tuple[Optional[CalibratedFaceAndGazeEvent], np.ndarray]:
+        """Run calibration adapter and downstream pipeline steps for a frame."""
+        calibrated_evt = None
+        if self.calibration_adapter_step is not None:
+            calibrated_evt = self.calibration_adapter_step.receive_frame(frame, evt)
+        self._latest_calibrated_evt = calibrated_evt
+
+        pipeline_frame = frame
+        if not run_downstream:
+            return calibrated_evt, pipeline_frame
+
+        if self.overlay_step is not None:
+            overlay_frame = self.overlay_step.receive_frame(
+                pipeline_frame, evt, calibrated_evt
+            )
+            if overlay_frame is not None:
+                pipeline_frame = overlay_frame
+
+        if self.capture_step is not None:
+            self.capture_step.receive_frame(pipeline_frame, evt, calibrated_evt)
+
+        if self.udp_forward_step is not None:
+            self.udp_forward_step.receive_frame(pipeline_frame, evt, calibrated_evt)
+
+        return calibrated_evt, pipeline_frame
+
+    def _calibration_sample_payload(
+        self,
+        evt: Optional[FaceMeshEvent],
+        calibrated_evt: Optional[CalibratedFaceAndGazeEvent],
+        timestamp_ms: int,
+        phase: str,
+        current_point: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Build one calibration diagnostic sample for offline analysis."""
+        payload: Dict[str, Any] = {
+            "frameTimestampMs": int(timestamp_ms),
+            "phase": str(phase),
+            "target": {
+                "name": current_point.get("name") if current_point else None,
+                "x": current_point.get("x") if current_point else None,
+                "y": current_point.get("y") if current_point else None,
+            },
+            "eventTimestampMs": None,
+            "hasFace": False,
+            "landmarkCount": 0,
+            "headYaw": None,
+            "headPitch": None,
+            "headX": None,
+            "headY": None,
+            "headZ": None,
+            "roll": None,
+            "zeta": None,
+            "rawCombinedEyeYaw": None,
+            "rawCombinedEyePitch": None,
+            "rawLeftEyeYaw": None,
+            "rawLeftEyePitch": None,
+            "rawRightEyeYaw": None,
+            "rawRightEyePitch": None,
+            "faceDeltaYaw": None,
+            "faceDeltaPitch": None,
+            "correctedEyeYaw": None,
+            "correctedEyePitch": None,
+            "correctedYaw": None,
+            "correctedPitch": None,
+            "correctedScreenX": None,
+            "correctedScreenY": None,
+            "rawInputs": None,
+        }
+        if evt is None:
+            return payload
+
+        payload["eventTimestampMs"] = int(evt.ts)
+        payload["hasFace"] = bool(evt.has_face)
+        payload["landmarkCount"] = int(evt.landmark_count)
+        payload["headYaw"] = evt.head_yaw
+        payload["headPitch"] = evt.head_pitch
+        payload["headX"] = evt.camera_x
+        payload["headY"] = evt.camera_y
+        payload["headZ"] = evt.camera_z
+        payload["roll"] = evt.roll
+        payload["zeta"] = evt.zeta
+        payload["rawCombinedEyeYaw"] = evt.combined_eye_gaze_yaw
+        payload["rawCombinedEyePitch"] = evt.combined_eye_gaze_pitch
+        payload["rawLeftEyeYaw"] = evt.left_eye_gaze_yaw
+        payload["rawLeftEyePitch"] = evt.left_eye_gaze_pitch
+        payload["rawRightEyeYaw"] = evt.right_eye_gaze_yaw
+        payload["rawRightEyePitch"] = evt.right_eye_gaze_pitch
+        if calibrated_evt is not None:
+            payload["faceDeltaYaw"] = calibrated_evt.face_delta_yaw
+            payload["faceDeltaPitch"] = calibrated_evt.face_delta_pitch
+            payload["correctedEyeYaw"] = calibrated_evt.corrected_eye_yaw
+            payload["correctedEyePitch"] = calibrated_evt.corrected_eye_pitch
+            payload["correctedYaw"] = calibrated_evt.corrected_yaw
+            payload["correctedPitch"] = calibrated_evt.corrected_pitch
+            payload["correctedScreenX"] = calibrated_evt.corrected_screen_x
+            payload["correctedScreenY"] = calibrated_evt.corrected_screen_y
+        payload["rawInputs"] = evt.raw_mesh_inputs_dict()
+        return payload
+
+    def _save_calibration_session_data(
+        self,
+        session_timestamp_ms: int,
+        samples: List[Dict[str, Any]],
+        points: List[CalibrationPoint],
+        calib_matrix: Optional[CalibrationMatrix],
+    ) -> Path:
+        """Persist one calibration session payload for diagnostics."""
+        CALIBRATION_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        profile_name = getattr(self.args, "calibration_profile", "") or "default"
+        payload = {
+            "sessionTimestampMs": int(session_timestamp_ms),
+            "profile": profile_name,
+            "sampleCount": len(samples),
+            "samples": samples,
+            "points": [
+                {
+                    "name": p.name,
+                    "screenX": p.screen_x,
+                    "screenY": p.screen_y,
+                    "rawEyeYaw": p.raw_eye_yaw,
+                    "rawEyePitch": p.raw_eye_pitch,
+                    "rawLeftEyeYaw": p.raw_left_eye_yaw,
+                    "rawLeftEyePitch": p.raw_left_eye_pitch,
+                    "rawRightEyeYaw": p.raw_right_eye_yaw,
+                    "rawRightEyePitch": p.raw_right_eye_pitch,
+                    "headYaw": p.head_yaw,
+                    "headPitch": p.head_pitch,
+                    "zeta": p.zeta,
+                    "headX": p.head_x,
+                    "headY": p.head_y,
+                    "headZ": p.head_z,
+                    "sampleCount": p.sample_count,
+                }
+                for p in points
+            ],
+            "calibrationMatrix": (
+                {
+                    "centerYaw": calib_matrix.center_yaw,
+                    "centerPitch": calib_matrix.center_pitch,
+                    "faceCenterYaw": calib_matrix.face_center_yaw,
+                    "faceCenterPitch": calib_matrix.face_center_pitch,
+                    "centerZeta": calib_matrix.center_zeta,
+                    "matrixYawYaw": calib_matrix.matrix_yaw_yaw,
+                    "matrixYawPitch": calib_matrix.matrix_yaw_pitch,
+                    "matrixPitchYaw": calib_matrix.matrix_pitch_yaw,
+                    "matrixPitchPitch": calib_matrix.matrix_pitch_pitch,
+                    "faceCenterX": calib_matrix.face_center_x,
+                    "faceCenterY": calib_matrix.face_center_y,
+                    "faceCenterZ": calib_matrix.face_center_z,
+                    "screenCenterCamX": calib_matrix.screen_center_cam_x,
+                    "screenCenterCamY": calib_matrix.screen_center_cam_y,
+                    "screenCenterCamZ": calib_matrix.screen_center_cam_z,
+                    "screenAxisXX": calib_matrix.screen_axis_x_x,
+                    "screenAxisXY": calib_matrix.screen_axis_x_y,
+                    "screenAxisXZ": calib_matrix.screen_axis_x_z,
+                    "screenAxisYX": calib_matrix.screen_axis_y_x,
+                    "screenAxisYY": calib_matrix.screen_axis_y_y,
+                    "screenAxisYZ": calib_matrix.screen_axis_y_z,
+                    "screenFitRmse": calib_matrix.screen_fit_rmse,
+                    "sampleCount": calib_matrix.sample_count,
+                    "timestampMs": calib_matrix.timestamp_ms,
+                }
+                if calib_matrix is not None
+                else None
+            ),
+        }
+        path = CALIBRATION_DATA_DIR / f"calibration_session_{session_timestamp_ms}.json"
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return path
+
+    def _clear_calibration_session_data(self) -> int:
+        """Ensure calibration diagnostics start with one fresh session payload."""
+        CALIBRATION_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        removed = 0
+        for path in CALIBRATION_DATA_DIR.glob("calibration_session_*.json"):
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                logger.warning("Failed to remove calibration session file: %s", path)
+        return removed
+
+    def _transition_state(self, new_state: DispatcherState) -> None:
+        if self.state_machine is None:
+            return
+        current_state = self.state_machine.get_state()
+        if current_state == new_state:
+            return
+        self.state_machine.transition_to(new_state)
+
     def run_capture_loop(
         self, camera_reader, on_capture_click: Optional[Callable] = None
     ):
         """Run the main capture and display loop until user exits."""
         if self.display is None:
             raise RuntimeError("FrameDispatcher not started")
+        self.start_operational()
 
         overlay_enabled = bool(self.args.overlay)
-        capture_enabled = bool(self.args.capture and overlay_enabled)
-        capture_live_enabled = bool(self.args.capture and self.args.capture_live)
-        live_window_name = "FaceMesh Capture Live"
+        capture_enabled = bool(self.args.capture)
+        capture_live_enabled = bool(capture_enabled and self.args.capture_live)
         quiet = bool(getattr(self.args, "quiet", False))
         log_interval = float(getattr(self.args, "log_interval", 2.0))
 
         w = int(self.display["width"])
         h = int(self.display["height"])
-
-        if overlay_enabled:
-            if self.overlay_manager is None:
-                self.overlay_manager = OverlayManager(
-                    self.display, capture_enabled, self.args.overlay_fps
-                )
-            self.overlay_manager.initialize()
-
-        if capture_live_enabled:
-            cv2.namedWindow(live_window_name, cv2.WINDOW_NORMAL)
-            cv2.resizeWindow(live_window_name, min(1400, w), min(900, h))
-
-        latest_evt = None
+        overlay_manager: Optional[RuntimeOverlayManager] = None
+        capture_window_manager: Optional[CaptureWindowManager] = None
         last_log_time = 0.0
         running = True
         pixel_format = camera_reader.pixel_format
 
-        while running:
-            frame, timestamp_ms = camera_reader.read_frame()
-            if frame is None:
-                time.sleep(0.001)
-                continue
+        try:
+            if overlay_enabled:
+                overlay_manager = RuntimeOverlayManager(
+                    self.display,
+                    capture_enabled=False,
+                    overlay_fps=self.args.overlay_fps,
+                    click_through=True,
+                )
+                overlay_manager.initialize()
 
-            evt = self._process_frame(frame, timestamp_ms, pixel_format)
+            if capture_enabled:
+                capture_window_manager = CaptureWindowManager(self.display)
+                capture_window_manager.initialize()
 
-            if evt and evt.type == "mesh":
-                latest_evt = enrich_runtime_evt(evt, w, h)
+            while running:
+                frame, timestamp_ms = camera_reader.read_frame()
+                if frame is None:
+                    time.sleep(0.001)
+                    continue
 
-            if not quiet and log_interval > 0:
-                now = time.time()
-                if now - last_log_time >= log_interval:
-                    last_log_time = now
-                    if evt is not None and evt.has_face:
-                        logger.info(
-                            f"Face detected - landmarks: {evt.landmark_count} "
-                            f"head=({safe_float(evt.head_yaw):.1f}, {safe_float(evt.head_pitch):.1f}) "
-                            f"gaze=({safe_float(evt.combined_eye_gaze_yaw):.1f}, "
-                            f"{safe_float(evt.combined_eye_gaze_pitch):.1f})"
-                        )
-                    elif evt is not None:
-                        logger.info("No face detected")
+                evt = self._process_frame(frame, timestamp_ms, pixel_format)
+                calibrated_evt, _ = self._run_pipeline_steps(
+                    frame.copy(), evt, run_downstream=True
+                )
+                runtime_evt = enrich_runtime_evt(evt, calibrated_evt)
 
-            if self.overlay_manager:
-                self.overlay_manager.handle_events(
-                    on_click=lambda pos: save_test_capture(
-                        self.display,
-                        w,
-                        h,
-                        pos,
-                        frame,
-                        evt,
+                if not quiet and log_interval > 0:
+                    now = time.time()
+                    if now - last_log_time >= log_interval:
+                        last_log_time = now
+                        if evt is not None and evt.has_face:
+                            logger.info(
+                                f"Face detected - landmarks: {evt.landmark_count} "
+                                f"head=({safe_float(evt.head_yaw):.1f}, {safe_float(evt.head_pitch):.1f}) "
+                                f"gaze=({safe_float(evt.combined_eye_gaze_yaw):.1f}, "
+                                f"{safe_float(evt.combined_eye_gaze_pitch):.1f})"
+                            )
+                        elif evt is not None:
+                            logger.info("No face detected")
+
+                if overlay_manager is not None:
+                    overlay_manager.handle_events()
+                    if not overlay_manager.is_running():
+                        running = False
+                        break
+
+                capture_live_img = None
+                if capture_live_enabled and capture_window_manager is not None:
+                    mouse_x, mouse_y = capture_window_manager.get_mouse_position()
+                    snap = {
+                        "evt": evt,
+                        "frame": frame,
+                        "landmarks": list(evt.landmarks) if evt and evt.landmarks else None,
+                    }
+                    capture_live_img, _ = build_camera_capture_marked_image(
+                        snap,
+                        overlay_w=float(w),
+                        overlay_h=float(h),
+                        click_pos=(mouse_x, mouse_y),
+                        draw_click=False,
+                        draw_info_panel=False,
                     )
-                    if capture_enabled
-                    else None
-                )
-                if not self.overlay_manager.is_running():
-                    running = False
-                    break
 
-            if capture_live_enabled:
-                snap = {
-                    "evt": evt,
-                    "frame": frame,
-                    "landmarks": list(evt.landmarks) if evt and evt.landmarks else None,
-                }
-                live_img, _ = build_camera_capture_marked_image(
-                    snap,
-                    overlay_w=float(w),
-                    overlay_h=float(h),
-                    click_pos=(0.0, 0.0),
-                    draw_click=False,
-                )
-                if live_img is not None:
-                    cv2.imshow(live_window_name, live_img)
-                key = cv2.waitKey(1) & 0xFF
-                if key in (27, ord("q")):
-                    running = False
-                    if self.overlay_manager:
-                        self.overlay_manager.request_exit()
+                if capture_window_manager is not None:
+                    capture_window_manager.render(runtime_evt, capture_live_img)
+                    if not capture_window_manager.is_running():
+                        running = False
+                        break
+                    clicked = capture_window_manager.consume_click()
+                    if clicked is not None:
+                        if on_capture_click is not None:
+                            on_capture_click(clicked)
+                        else:
+                            save_test_capture(
+                                self.display,
+                                w,
+                                h,
+                                clicked,
+                                frame,
+                                evt,
+                                runtime_evt=runtime_evt,
+                            )
 
-            if self.overlay_manager:
-                self.overlay_manager.render_mesh(latest_evt)
-
-        if self.overlay_manager:
-            self.overlay_manager.shutdown()
-            self.overlay_manager = None
-        if capture_live_enabled:
-            cv2.destroyWindow(live_window_name)
+                if overlay_manager is not None:
+                    overlay_manager.render_mesh(runtime_evt)
+        finally:
+            if overlay_manager is not None:
+                overlay_manager.shutdown()
+            if capture_window_manager is not None:
+                capture_window_manager.shutdown()
 
     def run_calibration_workflow(
         self, camera_reader
@@ -251,6 +519,7 @@ class FrameDispatcher:
         """Execute the 9-point calibration workflow with on-screen guidance."""
         if self.display is None:
             raise RuntimeError("FrameDispatcher not started")
+        self.start_calibration()
 
         logger.info("Starting 9-point calibration workflow...")
         print("Starting 9-point calibration workflow...", flush=True)
@@ -258,14 +527,20 @@ class FrameDispatcher:
             "Please follow the on-screen instructions and look at each calibration point.",
             flush=True,
         )
+        cleared_sessions = self._clear_calibration_session_data()
+        if cleared_sessions > 0:
+            print(
+                f"Removed {cleared_sessions} previous calibration session file(s).",
+                flush=True,
+            )
 
         try:
-            if self.overlay_manager is None:
-                self.overlay_manager = OverlayManager(
+            if not isinstance(self.overlay_manager, CalibrationOverlayManager):
+                if self.overlay_manager is not None:
+                    self.overlay_manager.shutdown()
+                self.overlay_manager = CalibrationOverlayManager(
                     self.display,
-                    capture_enabled=False,
                     overlay_fps=self.args.overlay_fps,
-                    calibration_mode=True,
                 )
             self.overlay_manager.initialize()
             self.overlay_manager.start_calibration_sequence(
@@ -273,6 +548,8 @@ class FrameDispatcher:
             )
 
             calib_points: List[CalibrationPoint] = []
+            session_timestamp_ms = int(time.time() * 1000)
+            calibration_samples: List[Dict[str, Any]] = []
             pixel_format = camera_reader.pixel_format
 
             while True:
@@ -282,15 +559,26 @@ class FrameDispatcher:
                     continue
 
                 evt = self._process_frame(frame, timestamp_ms, pixel_format)
+                calibrated_evt, _ = self._run_pipeline_steps(
+                    frame, evt, run_downstream=False
+                )
 
                 self.overlay_manager.handle_events()
                 if not self.overlay_manager.is_running():
                     print("Calibration cancelled by user.", flush=True)
                     break
 
-                evt_dict = enrich_runtime_evt(
-                    evt, self.display["width"], self.display["height"]
+                calibration_samples.append(
+                    self._calibration_sample_payload(
+                        evt=evt,
+                        calibrated_evt=calibrated_evt,
+                        timestamp_ms=timestamp_ms,
+                        phase=self.overlay_manager.get_calibration_phase(),
+                        current_point=self.overlay_manager.get_current_calib_point(),
+                    )
                 )
+
+                evt_dict = enrich_runtime_evt(evt, calibrated_evt)
 
                 completed, calib_point = self.overlay_manager.update_calibration_state(
                     evt_dict
@@ -303,6 +591,7 @@ class FrameDispatcher:
                     print(
                         f"Calibration point {len(calib_points)}/9 completed at '{calib_point.name}' "
                         f"head=({calib_point.head_yaw:.2f}, {calib_point.head_pitch:.2f}) "
+                        f"head_xyz=({calib_point.head_x:.3f}, {calib_point.head_y:.3f}, {calib_point.head_z:.3f}) "
                         f"eye=({calib_point.raw_eye_yaw:.2f}, {calib_point.raw_eye_pitch:.2f}) "
                         f"zeta={calib_point.zeta:.2f}",
                         flush=True,
@@ -336,6 +625,7 @@ class FrameDispatcher:
                     f"eye_zero=({calib_matrix.center_yaw:.4f}, {calib_matrix.center_pitch:.4f}) "
                     f"face_zero=({calib_matrix.face_center_yaw:.4f}, {calib_matrix.face_center_pitch:.4f}) "
                     f"zeta={calib_matrix.center_zeta:.4f} "
+                    f"screen_fit_rmse={calib_matrix.screen_fit_rmse:.4f} "
                     f"samples={calib_matrix.sample_count}",
                     flush=True,
                 )
@@ -344,6 +634,18 @@ class FrameDispatcher:
                     f"Insufficient calibration points ({len(calib_points)}/9). Cannot compute calibration matrix.",
                     flush=True,
                 )
+
+            if calib_matrix is not None:
+                self.set_calibration(calib_matrix)
+                self.start_operational()
+
+            calibration_data_path = self._save_calibration_session_data(
+                session_timestamp_ms=session_timestamp_ms,
+                samples=calibration_samples,
+                points=calib_points,
+                calib_matrix=calib_matrix,
+            )
+            print(f"Calibration diagnostics saved to: {calibration_data_path}", flush=True)
 
             return calib_matrix, calib_points
 
@@ -359,6 +661,32 @@ class FrameDispatcher:
     def set_calibration(self, calibration: CalibrationMatrix) -> None:
         """Apply a new calibration matrix to the dispatcher."""
         self.calibration = calibration
+        if self.calibration_adapter_step is not None:
+            self.calibration_adapter_step.update_calibration(
+                pitch=calibration.center_pitch,
+                yaw=calibration.center_yaw,
+                roll=0.0,
+                face_center_yaw=calibration.face_center_yaw,
+                face_center_pitch=calibration.face_center_pitch,
+                center_zeta=calibration.center_zeta,
+                matrix_yaw_yaw=calibration.matrix_yaw_yaw,
+                matrix_yaw_pitch=calibration.matrix_yaw_pitch,
+                matrix_pitch_yaw=calibration.matrix_pitch_yaw,
+                matrix_pitch_pitch=calibration.matrix_pitch_pitch,
+                face_center_x=calibration.face_center_x,
+                face_center_y=calibration.face_center_y,
+                face_center_z=calibration.face_center_z,
+                screen_center_cam_x=calibration.screen_center_cam_x,
+                screen_center_cam_y=calibration.screen_center_cam_y,
+                screen_center_cam_z=calibration.screen_center_cam_z,
+                screen_axis_x_x=calibration.screen_axis_x_x,
+                screen_axis_x_y=calibration.screen_axis_x_y,
+                screen_axis_x_z=calibration.screen_axis_x_z,
+                screen_axis_y_x=calibration.screen_axis_y_x,
+                screen_axis_y_y=calibration.screen_axis_y_y,
+                screen_axis_y_z=calibration.screen_axis_y_z,
+                screen_fit_rmse=calibration.screen_fit_rmse,
+            )
 
     def get_latest_event(self) -> Optional[FaceMeshEvent]:
         """Return the most recent FaceMeshEvent."""
@@ -377,27 +705,35 @@ class FrameDispatcher:
         self.calibration_adapter_step.update_calibration(
             pitch=pitch, yaw=yaw, roll=roll
         )
-        self.state_machine.transition_to(DispatcherState.OPERATIONAL)
+        self._transition_state(DispatcherState.OPERATIONAL)
 
     def start_calibration(self) -> None:
         """Transition to CALIBRATION state."""
-        self.state_machine.transition_to(DispatcherState.CALIBRATION)
+        self._transition_state(DispatcherState.CALIBRATION)
+
+    def start_operational(self) -> None:
+        """Transition to OPERATIONAL state."""
+        self._transition_state(DispatcherState.OPERATIONAL)
 
     def set_capture_enabled(self, enabled: bool) -> None:
         """Enable or disable the capture pipeline step."""
-        self.capture_step.set_enabled(enabled)
+        if self.capture_step is not None:
+            self.capture_step.set_enabled(enabled)
 
     def set_overlay_enabled(self, enabled: bool) -> None:
         """Enable or disable the overlay pipeline step."""
-        self.overlay_step.set_enabled(enabled)
+        if self.overlay_step is not None:
+            self.overlay_step.set_enabled(enabled)
 
     def set_overlay_show_hud(self, show_hud: bool) -> None:
         """Toggle HUD display on the overlay step."""
-        self.overlay_step.set_show_hud(show_hud)
+        if self.overlay_step is not None:
+            self.overlay_step.set_show_hud(show_hud)
 
     def set_udp_forwarding_enabled(self, enabled: bool) -> None:
         """Enable or disable UDP data forwarding."""
-        self.udp_forward_step.set_enabled(enabled)
+        if self.udp_forward_step is not None:
+            self.udp_forward_step.set_enabled(enabled)
 
     def update_calibration(self, pitch: float, yaw: float, roll: float) -> None:
         """Update the calibration adapter's pitch/yaw/roll offsets."""

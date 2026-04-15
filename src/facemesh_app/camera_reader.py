@@ -1,6 +1,6 @@
 """
 CameraReader module for camera frame capture.
-Probes native pixel format and drains buffer to deliver only the latest frame.
+Probes native pixel format and returns camera frames with capture timestamps.
 """
 
 import logging
@@ -11,8 +11,6 @@ import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
-
-_DRAIN_LIMIT = 8
 
 
 class CameraReader:
@@ -121,7 +119,7 @@ class CameraReader:
         return info
 
     def read_frame(self) -> Tuple[Optional[np.ndarray], int]:
-        """Drain the camera buffer and return only the latest frame.
+        """Read one frame from the camera and return it with a timestamp.
 
         Returns:
             Tuple of (frame, timestamp_ms). Frame is None on failure.
@@ -129,21 +127,16 @@ class CameraReader:
         if self._cap is None:
             return None, 0
 
-        frame = None
-        for _ in range(_DRAIN_LIMIT):
-            ok, f = self._cap.read()
-            if not ok:
-                if frame is None:
-                    self._consecutive_failures += 1
-                    if self._consecutive_failures == 1:
-                        logger.warning("CameraReader: cap.read() returned False")
-                    elif self._consecutive_failures % 100 == 0:
-                        logger.warning(
-                            f"CameraReader: cap.read() has failed {self._consecutive_failures} consecutive times"
-                        )
-                    return None, 0
-                break
-            frame = f
+        ok, frame = self._cap.read()
+        if not ok:
+            self._consecutive_failures += 1
+            if self._consecutive_failures == 1:
+                logger.warning("CameraReader: cap.read() returned False")
+            elif self._consecutive_failures % 100 == 0:
+                logger.warning(
+                    f"CameraReader: cap.read() has failed {self._consecutive_failures} consecutive times"
+                )
+            return None, 0
 
         if self._consecutive_failures > 0:
             logger.info(

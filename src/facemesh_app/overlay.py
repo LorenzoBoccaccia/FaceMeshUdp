@@ -82,22 +82,35 @@ def draw_mouse_triangle(surface, x: float, y: float, color=WHITE):
 
 
 def draw_capture_hud(
-    surface, font_small, dot_x: float, dot_y: float, evt: Optional[Dict], fps: float
+    surface, font_small, mouse_x: float, mouse_y: float, evt: Optional[Dict], fps: float
 ):
-    """Draw capture HUD with basic face tracking info."""
+    """Draw capture HUD near the cursor with live face and gaze values."""
     has_face = bool(evt and evt.get("hasFace"))
+    head_yaw = evt.get("head_yaw") if evt else None
+    head_pitch = evt.get("head_pitch") if evt else None
+    eye_yaw = evt.get("raw_combined_eye_gaze_yaw") if evt else None
+    eye_pitch = evt.get("raw_combined_eye_gaze_pitch") if evt else None
+
+    def _fmt(value: Optional[float]) -> str:
+        if value is None:
+            return "--"
+        return f"{safe_float(value, 0.0):0.1f}"
 
     lines = [
         f"FACE: {'YES' if has_face else 'NO'}",
-        f"FPS  : {fps:0.1f}",
+        f"FPS: {fps:0.1f}",
+        f"HEAD YAW: {_fmt(head_yaw)}",
+        f"HEAD PITCH: {_fmt(head_pitch)}",
+        f"EYE YAW: {_fmt(eye_yaw)}",
+        f"EYE PITCH: {_fmt(eye_pitch)}",
     ]
 
     pad = 8
-    line_h = 20
-    box_w = 190
+    line_h = max(18, font_small.get_linesize())
+    box_w = max(font_small.size(line)[0] for line in lines) + pad * 2
     box_h = pad * 2 + line_h * len(lines)
-    bx = int(clamp(dot_x + 30, 8, surface.get_width() - box_w - 8))
-    by = int(clamp(dot_y - box_h / 2, 8, surface.get_height() - box_h - 8))
+    bx = int(clamp(mouse_x - box_w / 2.0, 8, surface.get_width() - box_w - 8))
+    by = int(clamp(mouse_y + 24, 8, surface.get_height() - box_h - 8))
 
     pygame.draw.rect(surface, HUD_BG, (bx, by, box_w, box_h), 0, border_radius=6)
     pygame.draw.rect(surface, BLUE, (bx, by, box_w, box_h), 1, border_radius=6)
@@ -213,8 +226,8 @@ class OverlayManager:
                 draw_capture_hud(
                     self._screen,
                     self._font_small,
-                    self._width / 2,
-                    self._height / 2,
+                    self._mouse_x,
+                    self._mouse_y,
                     evt,
                     fps,
                 )
@@ -283,22 +296,18 @@ class OverlayManager:
 
         elif self._calib_phase == "sampling":
             if evt:
-                combined_yaw = evt.get("calibrated_combined_eye_gaze_yaw")
-                combined_pitch = evt.get("calibrated_combined_eye_gaze_pitch")
+                combined_yaw = evt.get("raw_combined_eye_gaze_yaw")
+                combined_pitch = evt.get("raw_combined_eye_gaze_pitch")
                 if combined_yaw is not None and combined_pitch is not None:
                     self._calib_samples.append(
                         {
                             "eye_yaw": combined_yaw,
                             "eye_pitch": combined_pitch,
-                            "left_eye_yaw": evt.get("calibrated_left_eye_gaze_yaw")
+                            "left_eye_yaw": evt.get("raw_left_eye_gaze_yaw") or 0.0,
+                            "left_eye_pitch": evt.get("raw_left_eye_gaze_pitch")
                             or 0.0,
-                            "left_eye_pitch": evt.get("calibrated_left_eye_gaze_pitch")
-                            or 0.0,
-                            "right_eye_yaw": evt.get("calibrated_right_eye_gaze_yaw")
-                            or 0.0,
-                            "right_eye_pitch": evt.get(
-                                "calibrated_right_eye_gaze_pitch"
-                            )
+                            "right_eye_yaw": evt.get("raw_right_eye_gaze_yaw") or 0.0,
+                            "right_eye_pitch": evt.get("raw_right_eye_gaze_pitch")
                             or 0.0,
                         }
                     )
@@ -417,8 +426,8 @@ class OverlayManager:
         head_yaw = evt.get("head_yaw")
         head_pitch = evt.get("head_pitch")
 
-        eye_yaw = evt.get("calibrated_combined_eye_gaze_yaw")
-        eye_pitch = evt.get("calibrated_combined_eye_gaze_pitch")
+        eye_yaw = evt.get("raw_combined_eye_gaze_yaw")
+        eye_pitch = evt.get("raw_combined_eye_gaze_pitch")
 
         if head_yaw is None or head_pitch is None:
             return

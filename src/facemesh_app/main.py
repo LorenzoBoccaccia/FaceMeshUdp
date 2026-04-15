@@ -230,7 +230,7 @@ def main():
             base_options=base,
             output_face_blendshapes=True,
             output_facial_transformation_matrixes=True,
-            running_mode=vision.RunningMode.IMAGE,
+            running_mode=vision.RunningMode.VIDEO,
             num_faces=1,
         )
         face_landmarker = vision.FaceLandmarker.create_from_options(opts)

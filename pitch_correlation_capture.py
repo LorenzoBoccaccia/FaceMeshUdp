@@ -44,6 +44,13 @@ HUD_BG = (20, 20, 20)
 HUD_BORDER = (230, 230, 230)
 HUD_TEXT = (245, 245, 245)
 
+LEFT_EYE_LANDMARKS = (33, 133, 145, 159, 468, 469, 470, 471, 472)
+RIGHT_EYE_LANDMARKS = (263, 362, 374, 386, 473, 474, 475, 476, 477)
+NOSE_BRIDGE_IDX = 168
+NOSE_BASE_IDX = 2
+LEFT_IRIS_CENTER_IDX = 468
+RIGHT_IRIS_CENTER_IDX = 473
+
 # 9 prompts to capture: 3 head positions x 3 eye positions
 # Head positions: down, center, up
 # Eye positions: down, center, up
@@ -189,6 +196,68 @@ def draw_text_with_background(
     )
 
 
+def _nose_plane_reference(
+    bridge_xy: Tuple[float, float],
+    base_xy: Tuple[float, float],
+    left_iris_xy: Tuple[float, float],
+    right_iris_xy: Tuple[float, float],
+) -> Optional[Dict[str, Any]]:
+    bx, by = bridge_xy
+    nbx, nby = base_xy
+    axis_x = nbx - bx
+    axis_y = nby - by
+    axis_len = math.hypot(axis_x, axis_y)
+    if axis_len <= 1e-9:
+        return None
+
+    n_hat_x = axis_x / axis_len
+    n_hat_y = axis_y / axis_len
+    p_hat_x = -n_hat_y
+    p_hat_y = n_hat_x
+
+    lx, ly = left_iris_xy
+    rx, ry = right_iris_xy
+    eye_span = math.hypot(rx - lx, ry - ly)
+    if eye_span <= 1e-9:
+        return None
+
+    def point_projection(ix: float, iy: float) -> Dict[str, float]:
+        dx = ix - bx
+        dy = iy - by
+        signed = dx * n_hat_x + dy * n_hat_y
+        along_perp = dx * p_hat_x + dy * p_hat_y
+        proj_x = bx + along_perp * p_hat_x
+        proj_y = by + along_perp * p_hat_y
+        return {
+            "signed": signed,
+            "alongPerp": along_perp,
+            "projX": proj_x,
+            "projY": proj_y,
+        }
+
+    left_proj = point_projection(lx, ly)
+    right_proj = point_projection(rx, ry)
+    avg_signed = 0.5 * (left_proj["signed"] + right_proj["signed"])
+
+    return {
+        "axisLength": axis_len,
+        "eyeSpan": eye_span,
+        "nHatX": n_hat_x,
+        "nHatY": n_hat_y,
+        "pHatX": p_hat_x,
+        "pHatY": p_hat_y,
+        "leftSigned": left_proj["signed"],
+        "rightSigned": right_proj["signed"],
+        "avgSigned": avg_signed,
+        "leftProjX": left_proj["projX"],
+        "leftProjY": left_proj["projY"],
+        "rightProjX": right_proj["projX"],
+        "rightProjY": right_proj["projY"],
+        "leftAlongPerp": left_proj["alongPerp"],
+        "rightAlongPerp": right_proj["alongPerp"],
+    }
+
+
 def serialize_mediapipe_result(result) -> Dict[str, Any]:
     if result is None:
         return {}
@@ -317,6 +386,93 @@ def serialize_mediapipe_result(result) -> Dict[str, Any]:
             pass
         return None
 
+    def extract_eye_geometry(face_landmarks):
+        def get_point(idx):
+            if (
+                face_landmarks is None
+                or idx < 0
+                or idx >= len(face_landmarks)
+                or face_landmarks[idx] is None
+            ):
+                return None
+            point = face_landmarks[idx]
+            x = safe_float(point.get("x"), float("nan"))
+            y = safe_float(point.get("y"), float("nan"))
+            z = safe_float(point.get("z"), float("nan"))
+            if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(z)):
+                return None
+            return {
+                "x": x,
+                "y": y,
+                "z": z,
+            }
+
+        def get_xy(idx):
+            point = get_point(idx)
+            if point is None:
+                return None
+            return point["x"], point["y"]
+
+        def nose_reference():
+            bridge = get_xy(NOSE_BRIDGE_IDX)
+            base = get_xy(NOSE_BASE_IDX)
+            left_iris = get_xy(LEFT_IRIS_CENTER_IDX)
+            right_iris = get_xy(RIGHT_IRIS_CENTER_IDX)
+            if (
+                bridge is None
+                or base is None
+                or left_iris is None
+                or right_iris is None
+            ):
+                return None
+
+            ref = _nose_plane_reference(bridge, base, left_iris, right_iris)
+            if ref is None:
+                return None
+
+            return {
+                "bridge": get_point(NOSE_BRIDGE_IDX),
+                "base": get_point(NOSE_BASE_IDX),
+                "bridgeToBaseUnit": {"x": ref["nHatX"], "y": ref["nHatY"]},
+                "perpendicularAtBridgeUnit": {"x": ref["pHatX"], "y": ref["pHatY"]},
+                "bridgeToBaseLengthNorm": ref["axisLength"],
+                "eyeSpanNorm": ref["eyeSpan"],
+                "leftIrisToPerpendicularSignedNorm": ref["leftSigned"],
+                "rightIrisToPerpendicularSignedNorm": ref["rightSigned"],
+                "avgIrisToPerpendicularSignedNorm": ref["avgSigned"],
+                "leftIrisToPerpendicularByEyeSpan": ref["leftSigned"] / ref["eyeSpan"],
+                "rightIrisToPerpendicularByEyeSpan": ref["rightSigned"]
+                / ref["eyeSpan"],
+                "avgIrisToPerpendicularByEyeSpan": ref["avgSigned"] / ref["eyeSpan"],
+                "leftIrisPerpendicularFoot": {
+                    "x": ref["leftProjX"],
+                    "y": ref["leftProjY"],
+                },
+                "rightIrisPerpendicularFoot": {
+                    "x": ref["rightProjX"],
+                    "y": ref["rightProjY"],
+                },
+            }
+
+        geometry = {
+            "leftEye": {
+                "irisCenter": get_point(LEFT_IRIS_CENTER_IDX),
+                "innerCanthus": get_point(133),
+                "outerCanthus": get_point(33),
+                "upperEyelid": get_point(159),
+                "lowerEyelid": get_point(145),
+            },
+            "rightEye": {
+                "irisCenter": get_point(RIGHT_IRIS_CENTER_IDX),
+                "innerCanthus": get_point(362),
+                "outerCanthus": get_point(263),
+                "upperEyelid": get_point(386),
+                "lowerEyelid": get_point(374),
+            },
+        }
+        geometry["noseReference"] = nose_reference()
+        return geometry
+
     def serialize_blendshapes(blendshapes):
         if blendshapes is None:
             return None
@@ -351,6 +507,7 @@ def serialize_mediapipe_result(result) -> Dict[str, Any]:
         if fl and len(fl) > 0:
             # MediaPipe returns a list, one per face detected
             data["face_landmarks"] = serialize_landmarks(fl[0])
+            data["eye_geometry"] = extract_eye_geometry(data["face_landmarks"])
         else:
             print(f"Warning: No face landmarks found in result")
 
@@ -361,6 +518,100 @@ def serialize_mediapipe_result(result) -> Dict[str, Any]:
             data["face_blendshapes"] = serialize_blendshapes(fbs[0])
 
     return data
+
+
+def _landmark_to_px(landmark, width: int, height: int) -> Tuple[int, int]:
+    x = int(round(safe_float(getattr(landmark, "x", 0.0)) * width))
+    y = int(round(safe_float(getattr(landmark, "y", 0.0)) * height))
+    x = max(0, min(width - 1, x))
+    y = max(0, min(height - 1, y))
+    return x, y
+
+
+def _draw_eye_landmarks(frame, result) -> Optional[Dict[str, float]]:
+    if result is None or not getattr(result, "face_landmarks", None):
+        return None
+    face_landmarks = result.face_landmarks[0]
+    if face_landmarks is None:
+        return None
+
+    h, w = frame.shape[:2]
+
+    def draw_index(idx: int, color: Tuple[int, int, int], radius: int) -> None:
+        if idx < 0 or idx >= len(face_landmarks):
+            return
+        point = _landmark_to_px(face_landmarks[idx], w, h)
+        cv2.circle(frame, point, radius + 1, WHITE, -1, cv2.LINE_AA)
+        cv2.circle(frame, point, radius, color, -1, cv2.LINE_AA)
+
+    for idx in LEFT_EYE_LANDMARKS:
+        draw_index(idx, (0, 165, 255), 3 if idx == 468 else 2)
+    for idx in RIGHT_EYE_LANDMARKS:
+        draw_index(idx, (255, 220, 40), 3 if idx == 473 else 2)
+
+    def get_px(idx: int):
+        if idx < 0 or idx >= len(face_landmarks):
+            return None
+        return _landmark_to_px(face_landmarks[idx], w, h)
+
+    bridge = get_px(NOSE_BRIDGE_IDX)
+    base = get_px(NOSE_BASE_IDX)
+    left_iris = get_px(LEFT_IRIS_CENTER_IDX)
+    right_iris = get_px(RIGHT_IRIS_CENTER_IDX)
+    if bridge is None or base is None:
+        return None
+
+    cv2.circle(frame, bridge, 6, WHITE, -1, cv2.LINE_AA)
+    cv2.circle(frame, bridge, 4, RED, -1, cv2.LINE_AA)
+    cv2.circle(frame, base, 6, WHITE, -1, cv2.LINE_AA)
+    cv2.circle(frame, base, 4, YELLOW, -1, cv2.LINE_AA)
+
+    if left_iris is None or right_iris is None:
+        return None
+
+    bridge_f = (float(bridge[0]), float(bridge[1]))
+    base_f = (float(base[0]), float(base[1]))
+    left_f = (float(left_iris[0]), float(left_iris[1]))
+    right_f = (float(right_iris[0]), float(right_iris[1]))
+    ref = _nose_plane_reference(bridge_f, base_f, left_f, right_f)
+    if ref is None:
+        return None
+
+    cv2.line(frame, bridge, base, WHITE, 4, cv2.LINE_AA)
+    cv2.line(frame, bridge, base, RED, 2, cv2.LINE_AA)
+
+    half_len = int(max(90.0, ref["eyeSpan"] * 2.5))
+    p1 = (
+        int(round(bridge_f[0] - ref["pHatX"] * half_len)),
+        int(round(bridge_f[1] - ref["pHatY"] * half_len)),
+    )
+    p2 = (
+        int(round(bridge_f[0] + ref["pHatX"] * half_len)),
+        int(round(bridge_f[1] + ref["pHatY"] * half_len)),
+    )
+    cv2.line(frame, p1, p2, WHITE, 4, cv2.LINE_AA)
+    cv2.line(frame, p1, p2, GREEN, 2, cv2.LINE_AA)
+
+    left_proj = (int(round(ref["leftProjX"])), int(round(ref["leftProjY"])))
+    right_proj = (int(round(ref["rightProjX"])), int(round(ref["rightProjY"])))
+    cv2.line(frame, left_iris, left_proj, WHITE, 3, cv2.LINE_AA)
+    cv2.line(frame, left_iris, left_proj, (0, 165, 255), 1, cv2.LINE_AA)
+    cv2.line(frame, right_iris, right_proj, WHITE, 3, cv2.LINE_AA)
+    cv2.line(frame, right_iris, right_proj, (255, 220, 40), 1, cv2.LINE_AA)
+    cv2.circle(frame, left_proj, 3, WHITE, -1, cv2.LINE_AA)
+    cv2.circle(frame, right_proj, 3, WHITE, -1, cv2.LINE_AA)
+
+    axis_angle = math.degrees(math.atan2(ref["nHatY"], ref["nHatX"]))
+
+    return {
+        "leftSignedPx": ref["leftSigned"],
+        "rightSignedPx": ref["rightSigned"],
+        "avgSignedPx": ref["avgSigned"],
+        "bridgeToBasePx": ref["axisLength"],
+        "eyeSpanPx": ref["eyeSpan"],
+        "avgByEyeSpan": ref["avgSigned"] / ref["eyeSpan"],
+        "axisAngleDeg": axis_angle,
+    }
 
 
 @dataclass
@@ -399,6 +650,7 @@ class PitchCorrelationCapture:
         self.mouse_clicked = False
         self.mouse_pos = (0, 0)
         self.last_result = None
+        self.last_nose_reference = None
 
         # Create output directory
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -509,6 +761,34 @@ class PitchCorrelationCapture:
                 cv2.LINE_AA,
             )
 
+        if isinstance(self.last_nose_reference, dict):
+            left_h = safe_float(self.last_nose_reference.get("leftSignedPx"), 0.0)
+            right_h = safe_float(self.last_nose_reference.get("rightSignedPx"), 0.0)
+            avg_h = safe_float(self.last_nose_reference.get("avgSignedPx"), 0.0)
+            norm_h = safe_float(self.last_nose_reference.get("avgByEyeSpan"), 0.0)
+            axis_deg = safe_float(self.last_nose_reference.get("axisAngleDeg"), 0.0)
+            x0 = max(30, w - 620)
+            cv2.putText(
+                frame,
+                f"Iris->perp signed(px) L:{left_h:+.1f} R:{right_h:+.1f} A:{avg_h:+.1f}",
+                (x0, 78),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.62,
+                YELLOW,
+                2,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                frame,
+                f"Norm(A/eyeSpan): {norm_h:+.3f}   Nose-axis: {axis_deg:+.1f} deg",
+                (x0, 104),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                WHITE,
+                1,
+                cv2.LINE_AA,
+            )
+
         return frame
 
     def capture_point(self, prompt: Dict[str, Any]) -> Optional[PitchCorrelationPoint]:
@@ -546,6 +826,8 @@ class PitchCorrelationCapture:
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
             result = self.landmarker.detect(mp_image)
             self.last_result = result
+
+            self.last_nose_reference = _draw_eye_landmarks(frame_bgr, result)
 
             # Draw UI
             frame_with_ui = self.draw_ui(

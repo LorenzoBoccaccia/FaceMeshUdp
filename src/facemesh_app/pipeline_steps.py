@@ -28,6 +28,7 @@ class FaceMeshStep:
 
     def __init__(self, face_landmarker: vision.FaceLandmarker):
         self.face_landmarker = face_landmarker
+        self._last_timestamp_ms = -1
 
     def receive_frame(
         self, frame, timestamp_ms: int, pixel_format: str = "bgr"
@@ -44,8 +45,13 @@ class FaceMeshStep:
                 frame_rgb = cv2.cvtColor(frame, code)
 
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
-            result = self.face_landmarker.detect(mp_image)
-            evt = FaceMeshEvent.from_landmarker_result(result, ts=timestamp_ms)
+            ts = int(timestamp_ms)
+            if ts <= self._last_timestamp_ms:
+                ts = self._last_timestamp_ms + 1
+            self._last_timestamp_ms = ts
+
+            result = self.face_landmarker.detect_for_video(mp_image, ts)
+            evt = FaceMeshEvent.from_landmarker_result(result, ts=ts)
             return evt
 
         except Exception as e:

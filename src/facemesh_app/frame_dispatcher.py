@@ -54,40 +54,34 @@ def enrich_runtime_evt(
     if not evt:
         return None
 
-    result = dict(evt.to_overlay_dict())
+    raw_left_yaw = evt.left_eye_gaze_yaw
+    raw_left_pitch = evt.left_eye_gaze_pitch
+    raw_right_yaw = evt.right_eye_gaze_yaw
+    raw_right_pitch = evt.right_eye_gaze_pitch
 
-    result["head_yaw"] = evt.head_yaw
-    result["head_pitch"] = evt.head_pitch
+    raw_combined_yaw = None
+    if raw_left_yaw is not None and raw_right_yaw is not None:
+        raw_combined_yaw = (raw_left_yaw + raw_right_yaw) / 2.0
 
-    result["raw_left_eye_gaze_yaw"] = evt.left_eye_gaze_yaw
-    result["raw_left_eye_gaze_pitch"] = evt.left_eye_gaze_pitch
-    result["raw_right_eye_gaze_yaw"] = evt.right_eye_gaze_yaw
-    result["raw_right_eye_gaze_pitch"] = evt.right_eye_gaze_pitch
+    raw_combined_pitch = None
+    if raw_left_pitch is not None and raw_right_pitch is not None:
+        raw_combined_pitch = (raw_left_pitch + raw_right_pitch) / 2.0
 
-    if evt.left_eye_gaze_yaw is not None and evt.right_eye_gaze_yaw is not None:
-        result["raw_combined_eye_gaze_yaw"] = (
-            evt.left_eye_gaze_yaw + evt.right_eye_gaze_yaw
-        ) / 2.0
-    else:
-        result["raw_combined_eye_gaze_yaw"] = None
-
-    if evt.left_eye_gaze_pitch is not None and evt.right_eye_gaze_pitch is not None:
-        result["raw_combined_eye_gaze_pitch"] = (
-            evt.left_eye_gaze_pitch + evt.right_eye_gaze_pitch
-        ) / 2.0
-    else:
-        result["raw_combined_eye_gaze_pitch"] = None
-
-    result["calibrated_left_eye_gaze_yaw"] = evt.calibrated_left_eye_gaze_yaw
-    result["calibrated_left_eye_gaze_pitch"] = evt.calibrated_left_eye_gaze_pitch
-    result["calibrated_right_eye_gaze_yaw"] = evt.calibrated_right_eye_gaze_yaw
-    result["calibrated_right_eye_gaze_pitch"] = evt.calibrated_right_eye_gaze_pitch
-    result["calibrated_combined_eye_gaze_yaw"] = evt.calibrated_combined_eye_gaze_yaw
-    result["calibrated_combined_eye_gaze_pitch"] = (
-        evt.calibrated_combined_eye_gaze_pitch
-    )
-
-    return result
+    return {
+        "type": evt.type,
+        "hasFace": evt.has_face,
+        "landmarkCount": evt.landmark_count,
+        "ts": evt.ts,
+        "zeta": evt.zeta,
+        "head_yaw": evt.head_yaw,
+        "head_pitch": evt.head_pitch,
+        "raw_left_eye_gaze_yaw": raw_left_yaw,
+        "raw_left_eye_gaze_pitch": raw_left_pitch,
+        "raw_right_eye_gaze_yaw": raw_right_yaw,
+        "raw_right_eye_gaze_pitch": raw_right_pitch,
+        "raw_combined_eye_gaze_yaw": raw_combined_yaw,
+        "raw_combined_eye_gaze_pitch": raw_combined_pitch,
+    }
 
 
 class FrameDispatcher:
@@ -141,10 +135,8 @@ class FrameDispatcher:
     def _process_frame(
         self, frame: np.ndarray, timestamp_ms: int, pixel_format: str = "bgr"
     ) -> Optional[FaceMeshEvent]:
-        """Run FaceMesh detection on a single frame and apply calibration."""
+        """Run FaceMesh detection on a single frame."""
         evt = self.face_mesh_step.receive_frame(frame, timestamp_ms, pixel_format)
-        if evt is not None and self.calibration is not None:
-            evt.calibration = self.calibration
         self._latest_evt = evt
         return evt
 
@@ -200,8 +192,8 @@ class FrameDispatcher:
                         logger.info(
                             f"Face detected - landmarks: {evt.landmark_count} "
                             f"head=({safe_float(evt.head_yaw):.1f}, {safe_float(evt.head_pitch):.1f}) "
-                            f"gaze=({safe_float(evt.calibrated_combined_eye_gaze_yaw):.1f}, "
-                            f"{safe_float(evt.calibrated_combined_eye_gaze_pitch):.1f})"
+                            f"gaze=({safe_float(evt.combined_eye_gaze_yaw):.1f}, "
+                            f"{safe_float(evt.combined_eye_gaze_pitch):.1f})"
                         )
                     elif evt is not None:
                         logger.info("No face detected")

@@ -715,13 +715,13 @@ class UDPForwardStep:
         logger.debug(f"UDPForwardStep enabled: {enabled}")
 
     def _serialize_event(self, event: CalibratedFaceAndGazeEvent) -> bytes:
-        """Serialize calibrated event into an opentrack UDP pose payload.
+        """Serialize calibrated event to OpenTrack UDP payload.
 
         Args:
             event: Calibrated face and gaze event
 
         Returns:
-            UDP payload with x, y, z, yaw, pitch, roll values
+            Binary OpenTrack pose payload
         """
         face_event = event.face_mesh_event
 
@@ -740,8 +740,8 @@ class UDPForwardStep:
             if face_event and face_event.camera_z is not None
             else 0.0
         )
-        yaw = float(face_event.combined_eye_gaze_yaw + face_event.head_yaw)
-        pitch = float(face_event.combined_eye_gaze_pitch + face_event.head_pitch)
+        yaw = float(event.corrected_yaw)
+        pitch = float(event.corrected_pitch)
         roll = (
             float(face_event.roll)
             if face_event and face_event.roll is not None

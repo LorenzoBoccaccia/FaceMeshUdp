@@ -244,9 +244,11 @@ def project_head_angles_to_screen_xy(
     screen_axis_y_x: Any,
     screen_axis_y_y: Any,
     screen_axis_y_z: Any,
-    screen_fit_rmse: Any,
-    origin_x: Any,
-    origin_y: Any,
+    screen_fit_rmse: Any = -1.0,
+    screen_scale_x: Any = 1.0,
+    screen_scale_y: Any = 1.0,
+    origin_x: Any = None,
+    origin_y: Any = None,
 ) -> Optional[Dict[str, float]]:
     yaw = _finite_float(yaw_deg)
     pitch = _finite_float(pitch_deg)
@@ -285,13 +287,17 @@ def project_head_angles_to_screen_xy(
     if projected is None:
         return None
     offset_x, offset_y, projection_t = projected
+    scale_x = _positive_or(screen_scale_x, 1.0)
+    scale_y = _positive_or(screen_scale_y, 1.0)
     origin_x_f = safe_float(origin_x, 0.0)
     origin_y_f = safe_float(origin_y, 0.0)
+    offset_x_px = float(offset_x * scale_x)
+    offset_y_px = float(offset_y * scale_y)
     return {
-        "screen_x": float(origin_x_f + offset_x),
-        "screen_y": float(origin_y_f + offset_y),
-        "offset_x": float(offset_x),
-        "offset_y": float(offset_y),
+        "screen_x": float(origin_x_f + offset_x_px),
+        "screen_y": float(origin_y_f + offset_y_px),
+        "offset_x": float(offset_x_px),
+        "offset_y": float(offset_y_px),
         "projection_t": float(projection_t),
     }
 
@@ -313,9 +319,11 @@ def screen_xy_to_head_angles(
     screen_axis_y_x: Any,
     screen_axis_y_y: Any,
     screen_axis_y_z: Any,
-    screen_fit_rmse: Any,
-    origin_x: Any,
-    origin_y: Any,
+    screen_fit_rmse: Any = -1.0,
+    screen_scale_x: Any = 1.0,
+    screen_scale_y: Any = 1.0,
+    origin_x: Any = None,
+    origin_y: Any = None,
 ) -> Optional[Tuple[float, float]]:
     sx = _finite_float(screen_x)
     sy = _finite_float(screen_y)
@@ -346,10 +354,12 @@ def screen_xy_to_head_angles(
 
     origin_x_f = safe_float(origin_x, 0.0)
     origin_y_f = safe_float(origin_y, 0.0)
+    scale_x = _positive_or(screen_scale_x, 1.0)
+    scale_y = _positive_or(screen_scale_y, 1.0)
     target = (
         screen_center
-        + (sx - origin_x_f) * screen_axis_x
-        + (sy - origin_y_f) * screen_axis_y
+        + ((sx - origin_x_f) / scale_x) * screen_axis_x
+        + ((sy - origin_y_f) / scale_y) * screen_axis_y
     )
     direction = target - np.array([head_x_f, head_y_f, head_z_f], dtype=float)
     direction_norm = float(np.linalg.norm(direction))
@@ -420,7 +430,14 @@ def _project_from_head_and_angles(
     if offsets is None:
         return None
     offset_x, offset_y = offsets
-    return project_xy_to_screen(ox + offset_x, oy + offset_y, width, height)
+    scale_x = _positive_or(evt.get("screen_scale_x"), 1.0)
+    scale_y = _positive_or(evt.get("screen_scale_y"), 1.0)
+    return project_xy_to_screen(
+        ox + offset_x * scale_x,
+        oy + offset_y * scale_y,
+        width,
+        height,
+    )
 
 
 def _raw_sum_angles(evt: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:

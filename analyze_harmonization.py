@@ -105,6 +105,9 @@ def extract_measurements(raw_result: Dict[str, Any]) -> Dict[str, Optional[float
         "head_yaw": event.head_yaw,
         "head_pitch": event.head_pitch,
         "head_roll": event.roll,
+        "translation_x": event.x,
+        "translation_y": event.y,
+        "translation_z": event.raw_transform_z,
         "eye_yaw": event.combined_eye_gaze_yaw,
         "eye_pitch": event.combined_eye_gaze_pitch,
         "left_eye_yaw": event.left_eye_gaze_yaw,
@@ -128,6 +131,7 @@ def build_measurement_map(points: List[Dict[str, Any]]) -> Dict[str, Dict[str, O
 def hydrate_points_from_prompts(
     points: List[Dict[str, Any]],
     prompts: List[Dict[str, Any]],
+    force_prompt_fields: bool = False,
 ) -> List[Dict[str, Any]]:
     prompt_by_name: Dict[str, Dict[str, Any]] = {}
     for prompt in prompts:
@@ -140,26 +144,26 @@ def hydrate_points_from_prompts(
         point_name = str(point.get("name") or "")
         prompt = prompt_by_name.get(point_name) or {}
         hydrated: Dict[str, Any] = dict(point)
-        if not hydrated.get("movementType"):
+        if force_prompt_fields or not hydrated.get("movementType"):
             hydrated["movementType"] = prompt.get("type", "")
-        if not hydrated.get("movementAxis"):
+        if force_prompt_fields or not hydrated.get("movementAxis"):
             hydrated["movementAxis"] = prompt.get("axis", "")
-        if not hydrated.get("movementDirection"):
+        if force_prompt_fields or not hydrated.get("movementDirection"):
             hydrated["movementDirection"] = prompt.get("direction", "")
         hydrated_points.append(hydrated)
     return hydrated_points
 
 
 def print_table(points: List[Dict[str, Any]], measurement_map: Dict[str, Dict[str, Optional[float]]]) -> None:
-    print("\n" + "=" * 120)
+    print("\n" + "=" * 162)
     print("HARMONIZATION CAPTURE TABLE")
-    print("=" * 120)
+    print("=" * 162)
     print(
         f"{'Point':<14} {'Type':<8} {'Axis':<7} {'Dir':<9} "
-        f"{'HeadYaw':>9} {'HeadPitch':>10} {'HeadRoll':>9} "
+        f"{'HeadYaw':>9} {'HeadPitch':>10} {'HeadRoll':>9} {'TransX':>9} {'TransY':>9} {'TransZ':>9} "
         f"{'EyeYaw':>9} {'EyePitch':>10} {'LeftEyeYaw':>11} {'RightEyeYaw':>12}"
     )
-    print("-" * 120)
+    print("-" * 162)
     for point in points:
         name = str(point.get("name") or "")
         m = measurement_map.get(name) or {}
@@ -171,6 +175,9 @@ def print_table(points: List[Dict[str, Any]], measurement_map: Dict[str, Dict[st
             f"{fmt(m.get('head_yaw'))} "
             f"{fmt(m.get('head_pitch'), width=10)} "
             f"{fmt(m.get('head_roll'))} "
+            f"{fmt(m.get('translation_x'))} "
+            f"{fmt(m.get('translation_y'))} "
+            f"{fmt(m.get('translation_z'))} "
             f"{fmt(m.get('eye_yaw'))} "
             f"{fmt(m.get('eye_pitch'), width=10)} "
             f"{fmt(m.get('left_eye_yaw'), width=11)} "
@@ -182,6 +189,11 @@ def resolve_operand(
     operand: Dict[str, Any],
     measurement_map: Dict[str, Dict[str, Optional[float]]],
 ) -> Tuple[Optional[float], str]:
+    if "value" in operand:
+        value = safe_float(operand.get("value"), float("nan"))
+        if math.isfinite(value):
+            return float(value), str(value)
+        return None, "invalid value operand"
     point_name = str(operand.get("point") or "")
     metric = str(operand.get("metric") or "")
     if not point_name or not metric:
@@ -313,8 +325,21 @@ def main() -> None:
     args = parser.parse_args()
 
     payload = load_harmonization_data(Path(args.data_dir))
-    prompts = payload.get("prompts") or HARMONIZATION_PROMPTS
-    points = hydrate_points_from_prompts(payload.get("points") or [], prompts)
+    payload_schema_version = int(safe_float(payload.get("schemaVersion"), 0.0))
+    force_prompt_fields = False
+    if payload_schema_version < HARMONIZATION_SCHEMA_VERSION:
+        prompts = HARMONIZATION_PROMPTS
+        test_case = HARMONIZATION_TEST_CASE
+        force_prompt_fields = True
+    else:
+        prompts = payload.get("prompts") or HARMONIZATION_PROMPTS
+        test_case = payload.get("testCase") or HARMONIZATION_TEST_CASE
+
+    points = hydrate_points_from_prompts(
+        payload.get("points") or [],
+        prompts,
+        force_prompt_fields=force_prompt_fields,
+    )
     if not points:
         print("Error: no harmonization points found")
         sys.exit(1)
@@ -322,7 +347,6 @@ def main() -> None:
     measurement_map = build_measurement_map(points)
     print_table(points, measurement_map)
 
-    test_case = payload.get("testCase") or HARMONIZATION_TEST_CASE
     rows, passed = evaluate_test_case(test_case, measurement_map)
     print_test_case_result(test_case, rows, passed)
 

@@ -12,6 +12,7 @@ from .calibration import CalibrationPoint
 from .facemesh_dao import safe_float
 from .overlay_common import (
     BLACK,
+    BLUE,
     DOT_RADIUS,
     GREEN,
     RED,
@@ -21,9 +22,9 @@ from .overlay_common import (
 
 
 CALIB_INSET = 50
-CALIB_BLINK_MS = 1000
-CALIB_COUNTDOWN_MS = 1000
-CALIB_AVG_MS = 500
+CALIB_BLINK_MS = 2000
+CALIB_COUNTDOWN_MS = 2000
+CALIB_AVG_MS = 1000
 CALIB_BLINK_PERIOD_MS = 220
 
 
@@ -42,6 +43,7 @@ class CalibrationOverlayManager:
 
         self._screen = None
         self._clock = None
+        self._font = None
         self._hwnd = None
 
         self._running = False
@@ -67,6 +69,7 @@ class CalibrationOverlayManager:
         self._hwnd = pygame.display.get_wm_info().get("window")
         set_window_topmost(self._hwnd)
         self._clock = pygame.time.Clock()
+        self._font = pygame.font.Font(None, 34)
         self._running = True
 
     def shutdown(self):
@@ -252,6 +255,10 @@ class CalibrationOverlayManager:
                         head_x=avg_head_x,
                         head_y=avg_head_y,
                         head_z=avg_head_z,
+                        nose_target_x=current_point.get("nose_x"),
+                        nose_target_y=current_point.get("nose_y"),
+                        eye_target_x=current_point.get("eye_x"),
+                        eye_target_y=current_point.get("eye_y"),
                     )
                 else:
                     head_yaw = safe_float(evt.get("head_yaw") if evt else None, 0.0)
@@ -277,6 +284,10 @@ class CalibrationOverlayManager:
                         head_x=head_x,
                         head_y=head_y,
                         head_z=head_z,
+                        nose_target_x=current_point.get("nose_x"),
+                        nose_target_y=current_point.get("nose_y"),
+                        eye_target_x=current_point.get("eye_x"),
+                        eye_target_y=current_point.get("eye_y"),
                     )
 
                 self._calib_phase = "blink_post"
@@ -304,13 +315,10 @@ class CalibrationOverlayManager:
         elapsed_ms: int,
     ):
         """Render calibration target for current phase."""
-        x = int(current_point["x"])
-        y = int(current_point["y"])
-
         if phase == "countdown":
             dot_color = RED
         elif phase == "sampling":
-            dot_color = GREEN
+            dot_color = BLUE
         else:
             if (elapsed_ms // CALIB_BLINK_PERIOD_MS) % 2 == 0:
                 dot_color = WHITE
@@ -318,25 +326,131 @@ class CalibrationOverlayManager:
                 dot_color = None
 
         if dot_color:
-            pygame.draw.circle(self._screen, dot_color, (x, y), DOT_RADIUS)
-            pygame.draw.circle(self._screen, WHITE, (x, y), DOT_RADIUS + 2, 2)
+            nose_x = int(round(current_point["nose_x"]))
+            nose_y = int(round(current_point["nose_y"]))
+            eye_x = int(round(current_point["eye_x"]))
+            eye_y = int(round(current_point["eye_y"]))
+            nose_color = RED if phase != "sampling" else BLUE
+            eye_color = GREEN if phase != "sampling" else BLUE
+            pygame.draw.circle(self._screen, nose_color, (nose_x, nose_y), DOT_RADIUS)
+            pygame.draw.circle(self._screen, WHITE, (nose_x, nose_y), DOT_RADIUS + 2, 2)
+            pygame.draw.circle(self._screen, eye_color, (eye_x, eye_y), DOT_RADIUS)
+            pygame.draw.circle(self._screen, WHITE, (eye_x, eye_y), DOT_RADIUS + 2, 2)
+
+        instruction = current_point.get("instruction", "")
+        label = f"{self._current_calib_idx + 1}/{len(self._calibration_sequence)}"
+        text = f"{label}  {instruction}"
+        text_surface = self._font.render(text, True, WHITE)
+        text_rect = text_surface.get_rect(center=(self._width // 2, 40))
+        self._screen.blit(text_surface, text_rect)
 
     def _make_calib_seq(self, width: float, height: float) -> List[Dict]:
         """Generate the calibration target list."""
         inset = CALIB_INSET
         w = width
         h = height
+        center_x = w / 2
+        center_y = h / 2
+        t = (center_x, inset)
+        b = (center_x, h - inset)
+        l = (inset, center_y)
+        r = (w - inset, center_y)
+        tl = (inset, inset)
+        tr = (w - inset, inset)
+        br = (w - inset, h - inset)
+        bl = (inset, h - inset)
 
         return [
-            {"name": "C", "x": w / 2, "y": h / 2},
-            {"name": "TL", "x": inset, "y": inset},
-            {"name": "TC", "x": w / 2, "y": inset},
-            {"name": "TR", "x": w - inset, "y": inset},
-            {"name": "R", "x": w - inset, "y": h / 2},
-            {"name": "BR", "x": w - inset, "y": h - inset},
-            {"name": "BC", "x": w / 2, "y": h - inset},
-            {"name": "BL", "x": inset, "y": h - inset},
-            {"name": "L", "x": inset, "y": h / 2},
+            {
+                "name": "C",
+                "x": center_x,
+                "y": center_y,
+                "nose_x": center_x,
+                "nose_y": center_y,
+                "eye_x": center_x,
+                "eye_y": center_y,
+                "instruction": "Look forward. Keep head and eyes centered.",
+            },
+            {
+                "name": "T",
+                "x": b[0],
+                "y": b[1],
+                "nose_x": t[0],
+                "nose_y": t[1],
+                "eye_x": b[0],
+                "eye_y": b[1],
+                "instruction": "Point nose to RED and eyes to GREEN.",
+            },
+            {
+                "name": "TL",
+                "x": br[0],
+                "y": br[1],
+                "nose_x": tl[0],
+                "nose_y": tl[1],
+                "eye_x": br[0],
+                "eye_y": br[1],
+                "instruction": "Point nose to RED and eyes to GREEN.",
+            },
+            {
+                "name": "L",
+                "x": r[0],
+                "y": r[1],
+                "nose_x": l[0],
+                "nose_y": l[1],
+                "eye_x": r[0],
+                "eye_y": r[1],
+                "instruction": "Point nose to RED and eyes to GREEN.",
+            },
+            {
+                "name": "BL",
+                "x": tr[0],
+                "y": tr[1],
+                "nose_x": bl[0],
+                "nose_y": bl[1],
+                "eye_x": tr[0],
+                "eye_y": tr[1],
+                "instruction": "Point nose to RED and eyes to GREEN.",
+            },
+            {
+                "name": "B",
+                "x": t[0],
+                "y": t[1],
+                "nose_x": b[0],
+                "nose_y": b[1],
+                "eye_x": t[0],
+                "eye_y": t[1],
+                "instruction": "Point nose to RED and eyes to GREEN.",
+            },
+            {
+                "name": "BR",
+                "x": tl[0],
+                "y": tl[1],
+                "nose_x": br[0],
+                "nose_y": br[1],
+                "eye_x": tl[0],
+                "eye_y": tl[1],
+                "instruction": "Point nose to RED and eyes to GREEN.",
+            },
+            {
+                "name": "R",
+                "x": l[0],
+                "y": l[1],
+                "nose_x": r[0],
+                "nose_y": r[1],
+                "eye_x": l[0],
+                "eye_y": l[1],
+                "instruction": "Point nose to RED and eyes to GREEN.",
+            },
+            {
+                "name": "TR",
+                "x": bl[0],
+                "y": bl[1],
+                "nose_x": tr[0],
+                "nose_y": tr[1],
+                "eye_x": bl[0],
+                "eye_y": bl[1],
+                "instruction": "Point nose to RED and eyes to GREEN.",
+            },
         ]
 
     def request_exit(self) -> None:

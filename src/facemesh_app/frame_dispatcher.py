@@ -129,10 +129,16 @@ def enrich_runtime_evt(
         payload["face_center_y"] = calibrated_evt.face_center_y
         payload["face_center_z"] = calibrated_evt.face_center_z
         payload["center_zeta"] = calibrated_evt.center_zeta
-        payload["matrix_yaw_yaw"] = calibrated_evt.matrix_yaw_yaw
-        payload["matrix_yaw_pitch"] = calibrated_evt.matrix_yaw_pitch
-        payload["matrix_pitch_yaw"] = calibrated_evt.matrix_pitch_yaw
-        payload["matrix_pitch_pitch"] = calibrated_evt.matrix_pitch_pitch
+        payload["yaw_coefficient_positive"] = calibrated_evt.yaw_coefficient_positive
+        payload["yaw_coefficient_negative"] = calibrated_evt.yaw_coefficient_negative
+        payload["pitch_coefficient_positive"] = calibrated_evt.pitch_coefficient_positive
+        payload["pitch_coefficient_negative"] = calibrated_evt.pitch_coefficient_negative
+        payload["yaw_from_pitch_coupling"] = calibrated_evt.yaw_from_pitch_coupling
+        payload["pitch_from_yaw_coupling"] = calibrated_evt.pitch_from_yaw_coupling
+        payload["eye_yaw_min"] = calibrated_evt.eye_yaw_min
+        payload["eye_yaw_max"] = calibrated_evt.eye_yaw_max
+        payload["eye_pitch_min"] = calibrated_evt.eye_pitch_min
+        payload["eye_pitch_max"] = calibrated_evt.eye_pitch_max
         payload["screen_center_cam_x"] = calibrated_evt.screen_center_cam_x
         payload["screen_center_cam_y"] = calibrated_evt.screen_center_cam_y
         payload["screen_center_cam_z"] = calibrated_evt.screen_center_cam_z
@@ -142,6 +148,8 @@ def enrich_runtime_evt(
         payload["screen_axis_y_x"] = calibrated_evt.screen_axis_y_x
         payload["screen_axis_y_y"] = calibrated_evt.screen_axis_y_y
         payload["screen_axis_y_z"] = calibrated_evt.screen_axis_y_z
+        payload["screen_scale_x"] = calibrated_evt.screen_scale_x
+        payload["screen_scale_y"] = calibrated_evt.screen_scale_y
         payload["screen_fit_rmse"] = calibrated_evt.screen_fit_rmse
         payload["overlay_x"] = overlay_x
         payload["overlay_y"] = overlay_y
@@ -251,6 +259,11 @@ class FrameDispatcher:
                 "name": current_point.get("name") if current_point else None,
                 "x": current_point.get("x") if current_point else None,
                 "y": current_point.get("y") if current_point else None,
+                "noseX": current_point.get("nose_x") if current_point else None,
+                "noseY": current_point.get("nose_y") if current_point else None,
+                "eyeX": current_point.get("eye_x") if current_point else None,
+                "eyeY": current_point.get("eye_y") if current_point else None,
+                "instruction": current_point.get("instruction") if current_point else None,
             },
             "eventTimestampMs": None,
             "hasFace": False,
@@ -341,6 +354,10 @@ class FrameDispatcher:
                     "headX": p.head_x,
                     "headY": p.head_y,
                     "headZ": p.head_z,
+                    "noseTargetX": p.nose_target_x,
+                    "noseTargetY": p.nose_target_y,
+                    "eyeTargetX": p.eye_target_x,
+                    "eyeTargetY": p.eye_target_y,
                     "sampleCount": p.sample_count,
                 }
                 for p in points
@@ -352,10 +369,16 @@ class FrameDispatcher:
                     "faceCenterYaw": calib_matrix.face_center_yaw,
                     "faceCenterPitch": calib_matrix.face_center_pitch,
                     "centerZeta": calib_matrix.center_zeta,
-                    "matrixYawYaw": calib_matrix.matrix_yaw_yaw,
-                    "matrixYawPitch": calib_matrix.matrix_yaw_pitch,
-                    "matrixPitchYaw": calib_matrix.matrix_pitch_yaw,
-                    "matrixPitchPitch": calib_matrix.matrix_pitch_pitch,
+                    "yawCoefficientPositive": calib_matrix.yaw_coefficient_positive,
+                    "yawCoefficientNegative": calib_matrix.yaw_coefficient_negative,
+                    "pitchCoefficientPositive": calib_matrix.pitch_coefficient_positive,
+                    "pitchCoefficientNegative": calib_matrix.pitch_coefficient_negative,
+                    "yawFromPitchCoupling": calib_matrix.yaw_from_pitch_coupling,
+                    "pitchFromYawCoupling": calib_matrix.pitch_from_yaw_coupling,
+                    "eyeYawMin": calib_matrix.eye_yaw_min,
+                    "eyeYawMax": calib_matrix.eye_yaw_max,
+                    "eyePitchMin": calib_matrix.eye_pitch_min,
+                    "eyePitchMax": calib_matrix.eye_pitch_max,
                     "faceCenterX": calib_matrix.face_center_x,
                     "faceCenterY": calib_matrix.face_center_y,
                     "faceCenterZ": calib_matrix.face_center_z,
@@ -368,6 +391,8 @@ class FrameDispatcher:
                     "screenAxisYX": calib_matrix.screen_axis_y_x,
                     "screenAxisYY": calib_matrix.screen_axis_y_y,
                     "screenAxisYZ": calib_matrix.screen_axis_y_z,
+                    "screenScaleX": calib_matrix.screen_scale_x,
+                    "screenScaleY": calib_matrix.screen_scale_y,
                     "screenFitRmse": calib_matrix.screen_fit_rmse,
                     "sampleCount": calib_matrix.sample_count,
                     "timestampMs": calib_matrix.timestamp_ms,
@@ -457,7 +482,8 @@ class FrameDispatcher:
                                 f"Face detected - landmarks: {evt.landmark_count} "
                                 f"head=({safe_float(evt.head_yaw):.1f}, {safe_float(evt.head_pitch):.1f}) "
                                 f"gaze=({safe_float(evt.combined_eye_gaze_yaw):.1f}, "
-                                f"{safe_float(evt.combined_eye_gaze_pitch):.1f})"
+                                f"{safe_float(evt.combined_eye_gaze_pitch):.1f}) "
+                                f"position=({safe_float(evt.x):.1f}, {safe_float(evt.y):.1f}, {safe_float(evt.z):.1f})"
                             )
                         elif evt is not None:
                             logger.info("No face detected")
@@ -524,7 +550,7 @@ class FrameDispatcher:
         logger.info("Starting 9-point calibration workflow...")
         print("Starting 9-point calibration workflow...", flush=True)
         print(
-            "Please follow the on-screen instructions and look at each calibration point.",
+            "Look forward for center, then align nose and eye with the dual targets at each step.",
             flush=True,
         )
         cleared_sessions = self._clear_calibration_session_data()
@@ -624,6 +650,12 @@ class FrameDispatcher:
                     "Calibration matrix: "
                     f"eye_zero=({calib_matrix.center_yaw:.4f}, {calib_matrix.center_pitch:.4f}) "
                     f"face_zero=({calib_matrix.face_center_yaw:.4f}, {calib_matrix.face_center_pitch:.4f}) "
+                    f"yaw_coeff=({calib_matrix.yaw_coefficient_negative:.4f}, {calib_matrix.yaw_coefficient_positive:.4f}) "
+                    f"pitch_coeff=({calib_matrix.pitch_coefficient_negative:.4f}, {calib_matrix.pitch_coefficient_positive:.4f}) "
+                    f"cross=({calib_matrix.yaw_from_pitch_coupling:.4f}, {calib_matrix.pitch_from_yaw_coupling:.4f}) "
+                    f"eye_yaw_range=({calib_matrix.eye_yaw_min:.4f}, {calib_matrix.eye_yaw_max:.4f}) "
+                    f"eye_pitch_range=({calib_matrix.eye_pitch_min:.4f}, {calib_matrix.eye_pitch_max:.4f}) "
+                    f"screen_scale=({calib_matrix.screen_scale_x:.4f}, {calib_matrix.screen_scale_y:.4f}) "
                     f"zeta={calib_matrix.center_zeta:.4f} "
                     f"screen_fit_rmse={calib_matrix.screen_fit_rmse:.4f} "
                     f"samples={calib_matrix.sample_count}",
@@ -669,10 +701,16 @@ class FrameDispatcher:
                 face_center_yaw=calibration.face_center_yaw,
                 face_center_pitch=calibration.face_center_pitch,
                 center_zeta=calibration.center_zeta,
-                matrix_yaw_yaw=calibration.matrix_yaw_yaw,
-                matrix_yaw_pitch=calibration.matrix_yaw_pitch,
-                matrix_pitch_yaw=calibration.matrix_pitch_yaw,
-                matrix_pitch_pitch=calibration.matrix_pitch_pitch,
+                yaw_coefficient_positive=calibration.yaw_coefficient_positive,
+                yaw_coefficient_negative=calibration.yaw_coefficient_negative,
+                pitch_coefficient_positive=calibration.pitch_coefficient_positive,
+                pitch_coefficient_negative=calibration.pitch_coefficient_negative,
+                yaw_from_pitch_coupling=calibration.yaw_from_pitch_coupling,
+                pitch_from_yaw_coupling=calibration.pitch_from_yaw_coupling,
+                eye_yaw_min=calibration.eye_yaw_min,
+                eye_yaw_max=calibration.eye_yaw_max,
+                eye_pitch_min=calibration.eye_pitch_min,
+                eye_pitch_max=calibration.eye_pitch_max,
                 face_center_x=calibration.face_center_x,
                 face_center_y=calibration.face_center_y,
                 face_center_z=calibration.face_center_z,
@@ -685,6 +723,8 @@ class FrameDispatcher:
                 screen_axis_y_x=calibration.screen_axis_y_x,
                 screen_axis_y_y=calibration.screen_axis_y_y,
                 screen_axis_y_z=calibration.screen_axis_y_z,
+                screen_scale_x=calibration.screen_scale_x,
+                screen_scale_y=calibration.screen_scale_y,
                 screen_fit_rmse=calibration.screen_fit_rmse,
             )
 

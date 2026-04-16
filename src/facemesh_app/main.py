@@ -182,7 +182,7 @@ def parse_args():
     parser.add_argument(
         "--udp-port",
         type=int,
-        default=_env_int("UDP_PORT", "5005"),
+        default=_env_int("UDP_PORT", "4242"),
         help="UDP forward target port",
     )
 
@@ -216,6 +216,12 @@ def main():
                 f"Loaded calibration from profile '{profile_name}': "
                 f"eye_zero=({calibration.center_yaw:.4f}, {calibration.center_pitch:.4f}) "
                 f"face_zero=({calibration.face_center_yaw:.4f}, {calibration.face_center_pitch:.4f}) "
+                f"yaw_coeff=({calibration.yaw_coefficient_negative:.4f}, {calibration.yaw_coefficient_positive:.4f}) "
+                f"pitch_coeff=({calibration.pitch_coefficient_negative:.4f}, {calibration.pitch_coefficient_positive:.4f}) "
+                f"cross=({calibration.yaw_from_pitch_coupling:.4f}, {calibration.pitch_from_yaw_coupling:.4f}) "
+                f"eye_yaw_range=({calibration.eye_yaw_min:.4f}, {calibration.eye_yaw_max:.4f}) "
+                f"eye_pitch_range=({calibration.eye_pitch_min:.4f}, {calibration.eye_pitch_max:.4f}) "
+                f"screen_scale=({calibration.screen_scale_x:.4f}, {calibration.screen_scale_y:.4f}) "
                 f"zeta={calibration.center_zeta:.4f} "
                 f"screen_fit_rmse={calibration.screen_fit_rmse:.4f} "
                 f"samples={calibration.sample_count}",
@@ -255,10 +261,20 @@ def main():
     face_center_yaw = calibration.face_center_yaw if calibration else 0.0
     face_center_pitch = calibration.face_center_pitch if calibration else 0.0
     center_zeta = calibration.center_zeta if calibration else 1200.0
-    matrix_yaw_yaw = calibration.matrix_yaw_yaw if calibration else 1.0
-    matrix_yaw_pitch = calibration.matrix_yaw_pitch if calibration else 0.0
-    matrix_pitch_yaw = calibration.matrix_pitch_yaw if calibration else 0.0
-    matrix_pitch_pitch = calibration.matrix_pitch_pitch if calibration else 1.0
+    yaw_coefficient_positive = calibration.yaw_coefficient_positive if calibration else 1.0
+    yaw_coefficient_negative = calibration.yaw_coefficient_negative if calibration else 1.0
+    pitch_coefficient_positive = (
+        calibration.pitch_coefficient_positive if calibration else 1.0
+    )
+    pitch_coefficient_negative = (
+        calibration.pitch_coefficient_negative if calibration else 1.0
+    )
+    yaw_from_pitch_coupling = calibration.yaw_from_pitch_coupling if calibration else 0.0
+    pitch_from_yaw_coupling = calibration.pitch_from_yaw_coupling if calibration else 0.0
+    eye_yaw_min = calibration.eye_yaw_min if calibration else -1.0
+    eye_yaw_max = calibration.eye_yaw_max if calibration else 1.0
+    eye_pitch_min = calibration.eye_pitch_min if calibration else -1.0
+    eye_pitch_max = calibration.eye_pitch_max if calibration else 1.0
     face_center_x = calibration.face_center_x if calibration else 0.0
     face_center_y = calibration.face_center_y if calibration else 0.0
     face_center_z = calibration.face_center_z if calibration else center_zeta
@@ -271,6 +287,8 @@ def main():
     screen_axis_y_x = calibration.screen_axis_y_x if calibration else 0.0
     screen_axis_y_y = calibration.screen_axis_y_y if calibration else 1.0
     screen_axis_y_z = calibration.screen_axis_y_z if calibration else 0.0
+    screen_scale_x = calibration.screen_scale_x if calibration else 1.0
+    screen_scale_y = calibration.screen_scale_y if calibration else 1.0
     screen_fit_rmse = calibration.screen_fit_rmse if calibration else -1.0
     calibration_adapter_step = CalibrationAdapterStep(
         pitch_calibration=pitch_calib,
@@ -279,10 +297,16 @@ def main():
         face_center_yaw=face_center_yaw,
         face_center_pitch=face_center_pitch,
         center_zeta=center_zeta,
-        matrix_yaw_yaw=matrix_yaw_yaw,
-        matrix_yaw_pitch=matrix_yaw_pitch,
-        matrix_pitch_yaw=matrix_pitch_yaw,
-        matrix_pitch_pitch=matrix_pitch_pitch,
+        yaw_coefficient_positive=yaw_coefficient_positive,
+        yaw_coefficient_negative=yaw_coefficient_negative,
+        pitch_coefficient_positive=pitch_coefficient_positive,
+        pitch_coefficient_negative=pitch_coefficient_negative,
+        yaw_from_pitch_coupling=yaw_from_pitch_coupling,
+        pitch_from_yaw_coupling=pitch_from_yaw_coupling,
+        eye_yaw_min=eye_yaw_min,
+        eye_yaw_max=eye_yaw_max,
+        eye_pitch_min=eye_pitch_min,
+        eye_pitch_max=eye_pitch_max,
         face_center_x=face_center_x,
         face_center_y=face_center_y,
         face_center_z=face_center_z,
@@ -295,6 +319,8 @@ def main():
         screen_axis_y_x=screen_axis_y_x,
         screen_axis_y_y=screen_axis_y_y,
         screen_axis_y_z=screen_axis_y_z,
+        screen_scale_x=screen_scale_x,
+        screen_scale_y=screen_scale_y,
         screen_fit_rmse=screen_fit_rmse,
         display_width=display["width"],
         display_height=display["height"],

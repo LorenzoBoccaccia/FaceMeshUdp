@@ -17,9 +17,10 @@ from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
 
 import cv2
-import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
+
+from capture_frame_flow import detect_face_landmarker_result, finalize_ui_frame
 
 
 def safe_float(v, fallback=0.0):
@@ -818,23 +819,17 @@ class YawCorrelationCapture:
                 time.sleep(0.01)
                 continue
 
-            # Mirror the frame horizontally (like a mirror)
-            frame_bgr = cv2.flip(frame_bgr, 1)
-
-            # Detect face mesh
-            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
-            result = self.landmarker.detect(mp_image)
+            result = detect_face_landmarker_result(self.landmarker, frame_bgr)
             self.last_result = result
 
-            self.last_nose_reference = _draw_eye_landmarks(frame_bgr, result)
+            frame_with_ui = frame_bgr.copy()
+            self.last_nose_reference = _draw_eye_landmarks(frame_with_ui, result)
 
-            # Draw UI
             frame_with_ui = self.draw_ui(
-                frame_bgr.copy(), prompt, self.current_prompt_index, len(PROMPTS)
+                frame_with_ui, prompt, self.current_prompt_index, len(PROMPTS)
             )
+            frame_with_ui = finalize_ui_frame(frame_with_ui)
 
-            # Display
             cv2.imshow("Yaw Correlation Capture", frame_with_ui)
 
             # Check for capture trigger

@@ -181,6 +181,26 @@ def session_points_to_calibration_points(
                 head_x=safe_float(point.get("headX"), 0.0),
                 head_y=safe_float(point.get("headY"), 0.0),
                 head_z=positive_or(point.get("headZ"), 1200.0),
+                nose_target_x=(
+                    safe_float(point.get("noseTargetX"), 0.0)
+                    if point.get("noseTargetX") is not None
+                    else None
+                ),
+                nose_target_y=(
+                    safe_float(point.get("noseTargetY"), 0.0)
+                    if point.get("noseTargetY") is not None
+                    else None
+                ),
+                eye_target_x=(
+                    safe_float(point.get("eyeTargetX"), 0.0)
+                    if point.get("eyeTargetX") is not None
+                    else None
+                ),
+                eye_target_y=(
+                    safe_float(point.get("eyeTargetY"), 0.0)
+                    if point.get("eyeTargetY") is not None
+                    else None
+                ),
             )
         )
 
@@ -197,10 +217,16 @@ def calibration_matrix_to_dict(matrix: CalibrationMatrix) -> Dict[str, Any]:
         "faceCenterYaw": float(matrix.face_center_yaw),
         "faceCenterPitch": float(matrix.face_center_pitch),
         "centerZeta": float(matrix.center_zeta),
-        "matrixYawYaw": float(matrix.matrix_yaw_yaw),
-        "matrixYawPitch": float(matrix.matrix_yaw_pitch),
-        "matrixPitchYaw": float(matrix.matrix_pitch_yaw),
-        "matrixPitchPitch": float(matrix.matrix_pitch_pitch),
+        "yawCoefficientPositive": float(matrix.yaw_coefficient_positive),
+        "yawCoefficientNegative": float(matrix.yaw_coefficient_negative),
+        "pitchCoefficientPositive": float(matrix.pitch_coefficient_positive),
+        "pitchCoefficientNegative": float(matrix.pitch_coefficient_negative),
+        "yawFromPitchCoupling": float(matrix.yaw_from_pitch_coupling),
+        "pitchFromYawCoupling": float(matrix.pitch_from_yaw_coupling),
+        "eyeYawMin": float(matrix.eye_yaw_min),
+        "eyeYawMax": float(matrix.eye_yaw_max),
+        "eyePitchMin": float(matrix.eye_pitch_min),
+        "eyePitchMax": float(matrix.eye_pitch_max),
         "faceCenterX": float(matrix.face_center_x),
         "faceCenterY": float(matrix.face_center_y),
         "faceCenterZ": float(matrix.face_center_z),
@@ -213,6 +239,8 @@ def calibration_matrix_to_dict(matrix: CalibrationMatrix) -> Dict[str, Any]:
         "screenAxisYX": float(matrix.screen_axis_y_x),
         "screenAxisYY": float(matrix.screen_axis_y_y),
         "screenAxisYZ": float(matrix.screen_axis_y_z),
+        "screenScaleX": float(matrix.screen_scale_x),
+        "screenScaleY": float(matrix.screen_scale_y),
         "screenFitRmse": float(matrix.screen_fit_rmse),
         "sampleCount": int(matrix.sample_count),
     }
@@ -271,6 +299,8 @@ def per_point_error_rows(
     screen_axis_y_x = safe_float(matrix.get("screenAxisYX"), 0.0)
     screen_axis_y_y = safe_float(matrix.get("screenAxisYY"), 1.0)
     screen_axis_y_z = safe_float(matrix.get("screenAxisYZ"), 0.0)
+    screen_scale_x = positive_or(matrix.get("screenScaleX"), 1.0)
+    screen_scale_y = positive_or(matrix.get("screenScaleY"), 1.0)
     has_screen_model = all(
         key in matrix
         for key in (
@@ -292,10 +322,16 @@ def per_point_error_rows(
     if screen_fit_rmse < 0.0:
         return [], "Session geometric screen model is invalid."
 
-    m_yy = safe_float(matrix.get("matrixYawYaw"), 1.0)
-    m_yp = safe_float(matrix.get("matrixYawPitch"), 0.0)
-    m_py = safe_float(matrix.get("matrixPitchYaw"), 0.0)
-    m_pp = safe_float(matrix.get("matrixPitchPitch"), 1.0)
+    yaw_coeff_positive = positive_or(matrix.get("yawCoefficientPositive"), 1.0)
+    yaw_coeff_negative = positive_or(matrix.get("yawCoefficientNegative"), 1.0)
+    pitch_coeff_positive = positive_or(matrix.get("pitchCoefficientPositive"), 1.0)
+    pitch_coeff_negative = positive_or(matrix.get("pitchCoefficientNegative"), 1.0)
+    yaw_from_pitch_coupling = safe_float(matrix.get("yawFromPitchCoupling"), 0.0)
+    pitch_from_yaw_coupling = safe_float(matrix.get("pitchFromYawCoupling"), 0.0)
+    eye_yaw_min = safe_float(matrix.get("eyeYawMin"), -1.0)
+    eye_yaw_max = safe_float(matrix.get("eyeYawMax"), 1.0)
+    eye_pitch_min = safe_float(matrix.get("eyePitchMin"), -1.0)
+    eye_pitch_max = safe_float(matrix.get("eyePitchMax"), 1.0)
 
     sampling_stats = summarize_sampling_frames(session.get("samples") or [])
     rows: List[Dict[str, Any]] = []
@@ -324,6 +360,8 @@ def per_point_error_rows(
             screen_axis_y_x=screen_axis_y_x,
             screen_axis_y_y=screen_axis_y_y,
             screen_axis_y_z=screen_axis_y_z,
+            screen_scale_x=screen_scale_x,
+            screen_scale_y=screen_scale_y,
             screen_fit_rmse=screen_fit_rmse,
             origin_x=center_x,
             origin_y=center_y,
@@ -345,10 +383,16 @@ def per_point_error_rows(
                 center_eye_pitch=center_eye_pitch,
                 face_center_yaw=face_center_yaw,
                 face_center_pitch=face_center_pitch,
-                matrix_yaw_yaw=m_yy,
-                matrix_yaw_pitch=m_yp,
-                matrix_pitch_yaw=m_py,
-                matrix_pitch_pitch=m_pp,
+                yaw_coefficient_positive=yaw_coeff_positive,
+                yaw_coefficient_negative=yaw_coeff_negative,
+                pitch_coefficient_positive=pitch_coeff_positive,
+                pitch_coefficient_negative=pitch_coeff_negative,
+                yaw_from_pitch_coupling=yaw_from_pitch_coupling,
+                pitch_from_yaw_coupling=pitch_from_yaw_coupling,
+                eye_yaw_min=eye_yaw_min,
+                eye_yaw_max=eye_yaw_max,
+                eye_pitch_min=eye_pitch_min,
+                eye_pitch_max=eye_pitch_max,
                 center_zeta=center_zeta,
                 face_center_x=face_center_x,
                 face_center_y=face_center_y,
@@ -362,6 +406,8 @@ def per_point_error_rows(
                 screen_axis_y_x=screen_axis_y_x,
                 screen_axis_y_y=screen_axis_y_y,
                 screen_axis_y_z=screen_axis_y_z,
+                screen_scale_x=screen_scale_x,
+                screen_scale_y=screen_scale_y,
                 screen_fit_rmse=screen_fit_rmse,
                 origin_x=center_x,
                 origin_y=center_y,
@@ -416,6 +462,10 @@ def per_point_error_rows(
                 "point_samples": int(safe_float(point.get("sampleCount"), 0)),
                 "sampling_frames": frame_count,
                 "face_rate": face_rate,
+                "eye_yaw": safe_float(point.get("rawEyeYaw")),
+                "eye_pitch": safe_float(point.get("rawEyePitch")),
+                "head_yaw": safe_float(point.get("headYaw")),
+                "head_pitch": safe_float(point.get("headPitch")),
                 "target_yaw": target_total_yaw,
                 "target_pitch": target_total_pitch,
                 "predicted_yaw": predicted_total_yaw,
@@ -490,8 +540,12 @@ def print_session_summary(path: Path, session: Dict[str, Any]) -> Optional[Dict[
             "model: "
             f"eyeZero=({safe_float(matrix.get('centerYaw')):.3f}, {safe_float(matrix.get('centerPitch')):.3f}) "
             f"faceZero=({safe_float(matrix.get('faceCenterYaw')):.3f}, {safe_float(matrix.get('faceCenterPitch')):.3f}) "
-            f"M=[[{safe_float(matrix.get('matrixYawYaw')):.3f}, {safe_float(matrix.get('matrixYawPitch')):.3f}], "
-            f"[{safe_float(matrix.get('matrixPitchYaw')):.3f}, {safe_float(matrix.get('matrixPitchPitch')):.3f}]] "
+            f"yawCoeff=({safe_float(matrix.get('yawCoefficientNegative'), 1.0):.3f}, {safe_float(matrix.get('yawCoefficientPositive'), 1.0):.3f}) "
+            f"pitchCoeff=({safe_float(matrix.get('pitchCoefficientNegative'), 1.0):.3f}, {safe_float(matrix.get('pitchCoefficientPositive'), 1.0):.3f}) "
+            f"cross=({safe_float(matrix.get('yawFromPitchCoupling'), 0.0):.3f}, {safe_float(matrix.get('pitchFromYawCoupling'), 0.0):.3f}) "
+            f"eyeYawRange=({safe_float(matrix.get('eyeYawMin'), -1.0):.3f}, {safe_float(matrix.get('eyeYawMax'), 1.0):.3f}) "
+            f"eyePitchRange=({safe_float(matrix.get('eyePitchMin'), -1.0):.3f}, {safe_float(matrix.get('eyePitchMax'), 1.0):.3f}) "
+            f"screenScale=({safe_float(matrix.get('screenScaleX'), 1.0):.3f}, {safe_float(matrix.get('screenScaleY'), 1.0):.3f}) "
             f"screenFitRmse={screen_fit_text}"
         )
     if err:
@@ -588,6 +642,7 @@ def print_session_summary(path: Path, session: Dict[str, Any]) -> Optional[Dict[
         )
 
     print_projection_inverse_identity(rows, matrix, center_x, center_y)
+    print_corner_calibration_matrix(rows)
 
     return {
         "file": path.name,
@@ -622,6 +677,8 @@ def print_projection_inverse_identity(
     screen_axis_y_x = safe_float(matrix.get("screenAxisYX"), 0.0)
     screen_axis_y_y = safe_float(matrix.get("screenAxisYY"), 1.0)
     screen_axis_y_z = safe_float(matrix.get("screenAxisYZ"), 0.0)
+    screen_scale_x = positive_or(matrix.get("screenScaleX"), 1.0)
+    screen_scale_y = positive_or(matrix.get("screenScaleY"), 1.0)
     screen_fit_rmse = safe_float(matrix.get("screenFitRmse"), -1.0)
 
     identity_rows: List[Dict[str, Any]] = []
@@ -642,6 +699,8 @@ def print_projection_inverse_identity(
             screen_axis_y_x=screen_axis_y_x,
             screen_axis_y_y=screen_axis_y_y,
             screen_axis_y_z=screen_axis_y_z,
+            screen_scale_x=screen_scale_x,
+            screen_scale_y=screen_scale_y,
             screen_fit_rmse=screen_fit_rmse,
             origin_x=origin_x,
             origin_y=origin_y,
@@ -664,6 +723,8 @@ def print_projection_inverse_identity(
             screen_axis_y_x=screen_axis_y_x,
             screen_axis_y_y=screen_axis_y_y,
             screen_axis_y_z=screen_axis_y_z,
+            screen_scale_x=screen_scale_x,
+            screen_scale_y=screen_scale_y,
             screen_fit_rmse=screen_fit_rmse,
             origin_x=origin_x,
             origin_y=origin_y,
@@ -708,6 +769,35 @@ def print_projection_inverse_identity(
     )
 
 
+def print_corner_calibration_matrix(rows: List[Dict[str, Any]]) -> None:
+    """Report corner-point eye and calibrated angles as a compact matrix."""
+    if not rows:
+        return
+    points = {str(row.get("name", "")): row for row in rows}
+    order = ("TL", "TR", "BL", "BR")
+    if any(name not in points for name in order):
+        return
+    print("-" * 332)
+    print("CORNER CANCELLATION MATRIX")
+    print(
+        f"{'Point':<6} {'RawEyeY':>9} {'RawEyeP':>9} {'FaceDY':>9} {'FaceDP':>9} "
+        f"{'CorrEyeY':>10} {'CorrEyeP':>10} {'SumY':>9} {'SumP':>9}"
+    )
+    for name in order:
+        row = points[name]
+        print(
+            f"{name:<6} "
+            f"{format_num(row.get('eye_yaw'), width=9)} "
+            f"{format_num(row.get('eye_pitch'), width=9)} "
+            f"{format_num(row.get('face_delta_yaw'), width=9)} "
+            f"{format_num(row.get('face_delta_pitch'), width=9)} "
+            f"{format_num(row.get('predicted_eye_yaw'), width=10)} "
+            f"{format_num(row.get('predicted_eye_pitch'), width=10)} "
+            f"{format_num(row.get('predicted_yaw'), width=9)} "
+            f"{format_num(row.get('predicted_pitch'), width=9)}"
+        )
+
+
 def print_cross_session_summary(results: List[Dict[str, Any]]) -> None:
     """Print top-line metrics across multiple analyzed sessions."""
     if len(results) <= 1:
@@ -733,7 +823,6 @@ def print_cross_session_summary(results: List[Dict[str, Any]]) -> None:
             f"{item['worst_mag']:>10.3f}"
         )
 
-
 def main() -> None:
     """Run calibration session analysis and print per-point error summaries."""
     parser = argparse.ArgumentParser(
@@ -757,6 +846,7 @@ def main() -> None:
         help="Analyze only the most recent calibration session file",
     )
     args = parser.parse_args()
+
 
     files = find_session_files(
         data_dir=Path(args.data_dir),

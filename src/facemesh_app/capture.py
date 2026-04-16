@@ -743,10 +743,20 @@ def save_test_capture(
                 "faceCenterY": runtime_evt.get("face_center_y"),
                 "faceCenterZ": runtime_evt.get("face_center_z"),
                 "centerZeta": runtime_evt.get("center_zeta"),
-                "matrixYawYaw": runtime_evt.get("matrix_yaw_yaw"),
-                "matrixYawPitch": runtime_evt.get("matrix_yaw_pitch"),
-                "matrixPitchYaw": runtime_evt.get("matrix_pitch_yaw"),
-                "matrixPitchPitch": runtime_evt.get("matrix_pitch_pitch"),
+                "yawCoefficientPositive": runtime_evt.get("yaw_coefficient_positive"),
+                "yawCoefficientNegative": runtime_evt.get("yaw_coefficient_negative"),
+                "pitchCoefficientPositive": runtime_evt.get(
+                    "pitch_coefficient_positive"
+                ),
+                "pitchCoefficientNegative": runtime_evt.get(
+                    "pitch_coefficient_negative"
+                ),
+                "yawFromPitchCoupling": runtime_evt.get("yaw_from_pitch_coupling"),
+                "pitchFromYawCoupling": runtime_evt.get("pitch_from_yaw_coupling"),
+                "eyeYawMin": runtime_evt.get("eye_yaw_min"),
+                "eyeYawMax": runtime_evt.get("eye_yaw_max"),
+                "eyePitchMin": runtime_evt.get("eye_pitch_min"),
+                "eyePitchMax": runtime_evt.get("eye_pitch_max"),
                 "screenCenterCamX": runtime_evt.get("screen_center_cam_x"),
                 "screenCenterCamY": runtime_evt.get("screen_center_cam_y"),
                 "screenCenterCamZ": runtime_evt.get("screen_center_cam_z"),
@@ -756,6 +766,8 @@ def save_test_capture(
                 "screenAxisYX": runtime_evt.get("screen_axis_y_x"),
                 "screenAxisYY": runtime_evt.get("screen_axis_y_y"),
                 "screenAxisYZ": runtime_evt.get("screen_axis_y_z"),
+                "screenScaleX": runtime_evt.get("screen_scale_x"),
+                "screenScaleY": runtime_evt.get("screen_scale_y"),
                 "screenFitRmse": runtime_evt.get("screen_fit_rmse"),
             }
             if isinstance(runtime_evt, dict)

@@ -123,6 +123,9 @@ class CaptureWindowManager:
         corr_eye_pitch = evt.get("corrected_eye_pitch") if evt else None
         corr_sum_yaw = evt.get("corrected_yaw") if evt else None
         corr_sum_pitch = evt.get("corrected_pitch") if evt else None
+        head_x = evt.get("head_x") if evt else None
+        head_y = evt.get("head_y") if evt else None
+        head_z = evt.get("head_z") if evt else None
 
         raw_sum_yaw = None
         raw_sum_pitch = None
@@ -145,6 +148,7 @@ class CaptureWindowManager:
         lines = [
             f"FACE: {'YES' if has_face else 'NO'}",
             f"FPS: {self._capture_fps:0.1f}",
+            f"HEAD XYZ: {_fmt(head_x)} / {_fmt(head_y)} / {_fmt(head_z)}",
             f"RAW FACE Y/P: {_fmt(raw_head_yaw)} / {_fmt(raw_head_pitch)}",
             f"RAW EYE  Y/P: {_fmt(raw_eye_yaw)} / {_fmt(raw_eye_pitch)}",
             f"RAW SUM  Y/P: {_fmt(raw_sum_yaw)} / {_fmt(raw_sum_pitch)}",

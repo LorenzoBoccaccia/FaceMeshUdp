@@ -17,11 +17,11 @@ from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
 
 import cv2
-import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
+from capture_frame_flow import detect_face_landmarker_result, finalize_ui_frame
 from facemesh_app.harmonization_contract import (
     HARMONIZATION_PROMPTS,
     HARMONIZATION_SCHEMA_VERSION,
@@ -399,24 +399,33 @@ class HarmonizationCapture:
 
         # Main instruction
         instruction = prompt["instruction"]
+        prompt_type = str(prompt.get("type") or "")
+        if prompt_type == "head":
+            instruction_bg = (40, 80, 40)
+            type_color = GREEN
+        elif prompt_type == "eye":
+            instruction_bg = (80, 60, 40)
+            type_color = YELLOW
+        else:
+            instruction_bg = (40, 40, 80)
+            type_color = WHITE
         draw_text_with_background(
             frame,
             instruction,
             (30, 100),
             font_scale=1.2,
-            bg_color=(40, 80, 40) if prompt["type"] == "head" else (80, 60, 40),
+            bg_color=instruction_bg,
         )
 
         # Type indicator
-        type_text = f"Type: {prompt['type'].upper()} movement"
-        color = GREEN if prompt["type"] == "head" else YELLOW
+        type_text = f"Type: {prompt_type.upper()} movement"
         cv2.putText(
             frame,
             type_text,
             (30, 160),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.8,
-            color,
+            type_color,
             2,
             cv2.LINE_AA,
         )
@@ -476,21 +485,14 @@ class HarmonizationCapture:
                 time.sleep(0.01)
                 continue
 
-            # Mirror the frame horizontally (like a mirror)
-            frame_bgr = cv2.flip(frame_bgr, 1)
-
-            # Detect face mesh
-            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
-            result = self.landmarker.detect(mp_image)
+            result = detect_face_landmarker_result(self.landmarker, frame_bgr)
             self.last_result = result
 
-            # Draw UI
             frame_with_ui = self.draw_ui(
                 frame_bgr.copy(), prompt, self.current_prompt_index, len(PROMPTS)
             )
+            frame_with_ui = finalize_ui_frame(frame_with_ui)
 
-            # Display
             cv2.imshow("Harmonization Capture", frame_with_ui)
 
             # Check for capture trigger
@@ -540,8 +542,8 @@ class HarmonizationCapture:
         print("\n" + "=" * 60)
         print("HARMONIZATION CAPTURE")
         print("=" * 60)
-        print("\nThis script will capture FaceMesh data for 8 different")
-        print("head and eye movements to help analyze coordinate systems.")
+        print(f"\nThis script will capture FaceMesh data for {len(PROMPTS)} different")
+        print("head, eye, and translation movements to help analyze coordinate systems.")
         print("\nInstructions:")
         print("- Follow each prompt to move your head or eyes")
         print("- Keep the movement steady when instructed")

@@ -2,19 +2,19 @@
 
 from typing import Any, Dict, List
 
-HARMONIZATION_SCHEMA_VERSION = 2
+HARMONIZATION_SCHEMA_VERSION = 5
 
 HARMONIZATION_PROMPTS: List[Dict[str, str]] = [
     {
         "name": "head-left",
-        "instruction": "Turn your HEAD to the LEFT",
+        "instruction": "Turn your HEAD to YOUR LEFT",
         "type": "head",
         "axis": "yaw",
         "direction": "negative",
     },
     {
         "name": "head-right",
-        "instruction": "Turn your HEAD to the RIGHT",
+        "instruction": "Turn your HEAD to YOUR RIGHT",
         "type": "head",
         "axis": "yaw",
         "direction": "positive",
@@ -35,14 +35,14 @@ HARMONIZATION_PROMPTS: List[Dict[str, str]] = [
     },
     {
         "name": "eye-left",
-        "instruction": "Look with your EYES to the LEFT (keep head still)",
+        "instruction": "Look with your EYES to YOUR LEFT (keep head still)",
         "type": "eye",
         "axis": "yaw",
         "direction": "negative",
     },
     {
         "name": "eye-right",
-        "instruction": "Look with your EYES to the RIGHT (keep head still)",
+        "instruction": "Look with your EYES to YOUR RIGHT (keep head still)",
         "type": "eye",
         "axis": "yaw",
         "direction": "positive",
@@ -61,11 +61,53 @@ HARMONIZATION_PROMPTS: List[Dict[str, str]] = [
         "axis": "pitch",
         "direction": "negative",
     },
+    {
+        "name": "move-left",
+        "instruction": "Move your HEAD to YOUR LEFT without turning",
+        "type": "translation",
+        "axis": "x",
+        "direction": "positive",
+    },
+    {
+        "name": "move-right",
+        "instruction": "Move your HEAD to YOUR RIGHT without turning",
+        "type": "translation",
+        "axis": "x",
+        "direction": "negative",
+    },
+    {
+        "name": "move-down",
+        "instruction": "Move your HEAD DOWN without turning",
+        "type": "translation",
+        "axis": "y",
+        "direction": "negative",
+    },
+    {
+        "name": "move-up",
+        "instruction": "Move your HEAD UP without turning",
+        "type": "translation",
+        "axis": "y",
+        "direction": "positive",
+    },
+    {
+        "name": "move-front",
+        "instruction": "Move your HEAD FORWARD toward camera without turning",
+        "type": "translation",
+        "axis": "z",
+        "direction": "positive",
+    },
+    {
+        "name": "move-back",
+        "instruction": "Move your HEAD BACKWARD away from camera without turning",
+        "type": "translation",
+        "axis": "z",
+        "direction": "negative",
+    },
 ]
 
 HARMONIZATION_TEST_CASE: Dict[str, Any] = {
-    "id": "harmonization-axis-sign-v1",
-    "description": "Validate head and eye sign conventions from harmonization points.",
+    "id": "harmonization-axis-sign-v4",
+    "description": "Validate head, eye, and translation sign conventions from harmonization points.",
     "comparisons": [
         {
             "name": "head_yaw_right_gt_left",
@@ -94,6 +136,97 @@ HARMONIZATION_TEST_CASE: Dict[str, Any] = {
             "op": "gt",
             "rhs": {"point": "eye-down", "metric": "eye_pitch"},
             "minDelta": 1.0,
+        },
+        {
+            "name": "translation_x_left_gt_right",
+            "lhs": {"point": "move-left", "metric": "translation_x"},
+            "op": "gt",
+            "rhs": {"point": "move-right", "metric": "translation_x"},
+            "minDelta": 0.01,
+        },
+        {
+            "name": "translation_y_up_gt_down",
+            "lhs": {"point": "move-up", "metric": "translation_y"},
+            "op": "gt",
+            "rhs": {"point": "move-down", "metric": "translation_y"},
+            "minDelta": 0.01,
+        },
+        {
+            "name": "translation_z_front_gt_back",
+            "lhs": {"point": "move-front", "metric": "translation_z"},
+            "op": "gt",
+            "rhs": {"point": "move-back", "metric": "translation_z"},
+            "minDelta": 0.01,
+        },
+        {
+            "name": "head_yaw_left_negative",
+            "lhs": {"point": "head-left", "metric": "head_yaw"},
+            "op": "lt",
+            "rhs": {"value": 0.0},
+            "minDelta": 0.0,
+        },
+        {
+            "name": "head_yaw_right_positive",
+            "lhs": {"point": "head-right", "metric": "head_yaw"},
+            "op": "gt",
+            "rhs": {"value": 0.0},
+            "minDelta": 0.0,
+        },
+        {
+            "name": "eye_yaw_left_negative",
+            "lhs": {"point": "eye-left", "metric": "eye_yaw"},
+            "op": "lt",
+            "rhs": {"value": 0.0},
+            "minDelta": 0.0,
+        },
+        {
+            "name": "eye_yaw_right_positive",
+            "lhs": {"point": "eye-right", "metric": "eye_yaw"},
+            "op": "gt",
+            "rhs": {"value": 0.0},
+            "minDelta": 0.0,
+        },
+        {
+            "name": "translation_x_left_positive",
+            "lhs": {"point": "move-left", "metric": "translation_x"},
+            "op": "gt",
+            "rhs": {"value": 0.0},
+            "minDelta": 0.0,
+        },
+        {
+            "name": "translation_x_right_negative",
+            "lhs": {"point": "move-right", "metric": "translation_x"},
+            "op": "lt",
+            "rhs": {"value": 0.0},
+            "minDelta": 0.0,
+        },
+        {
+            "name": "translation_y_up_positive",
+            "lhs": {"point": "move-up", "metric": "translation_y"},
+            "op": "gt",
+            "rhs": {"value": 0.0},
+            "minDelta": 0.0,
+        },
+        {
+            "name": "translation_y_down_negative",
+            "lhs": {"point": "move-down", "metric": "translation_y"},
+            "op": "lt",
+            "rhs": {"value": 0.0},
+            "minDelta": 0.0,
+        },
+        {
+            "name": "translation_z_front_negative",
+            "lhs": {"point": "move-front", "metric": "translation_z"},
+            "op": "lt",
+            "rhs": {"value": 0.0},
+            "minDelta": 0.0,
+        },
+        {
+            "name": "translation_z_back_negative",
+            "lhs": {"point": "move-back", "metric": "translation_z"},
+            "op": "lt",
+            "rhs": {"value": 0.0},
+            "minDelta": 0.0,
         },
     ],
 }

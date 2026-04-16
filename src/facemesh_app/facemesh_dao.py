@@ -235,7 +235,7 @@ class FaceMeshEvent:
         face_forward = self._normalize_vec3((-m44[0][2], -m44[1][2], -m44[2][2]))
         if face_forward is None:
             return self._cache_set("head_yaw", None)
-        return self._cache_set("head_yaw", -math.degrees(math.atan2(face_forward[0], -face_forward[2])))
+        return self._cache_set("head_yaw", math.degrees(math.atan2(face_forward[0], -face_forward[2])))
 
     @property
     def head_pitch(self) -> Optional[float]:
@@ -615,12 +615,12 @@ class FaceMeshEvent:
     @property
     def left_eye_gaze_yaw(self) -> Optional[float]:
         yp = self._left_eye_raw_yaw_pitch()
-        return -yp[0] if yp is not None else None
+        return yp[0] if yp is not None else None
 
     @property
     def right_eye_gaze_yaw(self) -> Optional[float]:
         yp = self._right_eye_raw_yaw_pitch()
-        return yp[0] if yp is not None else None
+        return -yp[0] if yp is not None else None
 
     @property
     def left_eye_gaze_pitch(self) -> Optional[float]:

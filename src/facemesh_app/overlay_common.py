@@ -68,15 +68,27 @@ def set_window_click_through(hwnd):
 
 
 def get_display_geo() -> Dict:
-    """Return primary display geometry."""
+    """Return primary display geometry including physical size in mm when available."""
     if sys.platform == "win32":
         user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+        width_px = int(user32.GetSystemMetrics(0))
+        height_px = int(user32.GetSystemMetrics(1))
+        HORZSIZE = 4
+        VERTSIZE = 6
+        hdc = user32.GetDC(0)
+        width_mm = int(gdi32.GetDeviceCaps(hdc, HORZSIZE)) if hdc else 0
+        height_mm = int(gdi32.GetDeviceCaps(hdc, VERTSIZE)) if hdc else 0
+        if hdc:
+            user32.ReleaseDC(0, hdc)
         return {
             "name": "Primary Display",
             "x": 0,
             "y": 0,
-            "width": int(user32.GetSystemMetrics(0)),
-            "height": int(user32.GetSystemMetrics(1)),
+            "width": width_px,
+            "height": height_px,
+            "width_mm": width_mm if width_mm > 0 else 0,
+            "height_mm": height_mm if height_mm > 0 else 0,
         }
     pygame.display.init()
     sizes = pygame.display.get_desktop_sizes()
@@ -85,4 +97,12 @@ def get_display_geo() -> Dict:
     else:
         info = pygame.display.Info()
         w, h = info.current_w, info.current_h
-    return {"name": "Display", "x": 0, "y": 0, "width": int(w), "height": int(h)}
+    return {
+        "name": "Display",
+        "x": 0,
+        "y": 0,
+        "width": int(w),
+        "height": int(h),
+        "width_mm": 0,
+        "height_mm": 0,
+    }

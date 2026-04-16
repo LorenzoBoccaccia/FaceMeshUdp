@@ -10,6 +10,7 @@ import urllib.request
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple, Callable, Any
 
+import cv2
 import numpy as np
 
 from .facemesh_dao import (
@@ -42,6 +43,7 @@ logger = logging.getLogger(__name__)
 MODEL_PATH = Path("face_landmarker.task")
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
 CALIBRATION_DATA_DIR = Path("calibration_data")
+CALIBRATION_DATAPOINT_DIR = Path("calibration_datapoint")
 
 
 def ensure_model():
@@ -415,7 +417,97 @@ class FrameDispatcher:
                 removed += 1
             except OSError:
                 logger.warning("Failed to remove calibration session file: %s", path)
+        CALIBRATION_DATAPOINT_DIR.mkdir(parents=True, exist_ok=True)
+        for path in CALIBRATION_DATAPOINT_DIR.glob("*"):
+            try:
+                if path.is_file():
+                    path.unlink()
+            except OSError:
+                logger.warning("Failed to remove calibration datapoint file: %s", path)
         return removed
+
+    def _save_calibration_datapoint(
+        self,
+        calib_point: CalibrationPoint,
+        evt: Any,
+        frame: Any,
+        calibrated_evt: Optional[CalibratedFaceAndGazeEvent],
+        timestamp_ms: int,
+    ) -> None:
+        """Dump per-point diagnostics (overlayed PNG + JSON) named by point position."""
+        if self.display is None:
+            return
+        CALIBRATION_DATAPOINT_DIR.mkdir(parents=True, exist_ok=True)
+        name = str(calib_point.name)
+        png_path = CALIBRATION_DATAPOINT_DIR / f"{name}.png"
+        json_path = CALIBRATION_DATAPOINT_DIR / f"{name}.json"
+
+        landmarks = None
+        if isinstance(evt, FaceMeshEvent) and evt.landmarks:
+            landmarks = list(evt.landmarks)
+        elif isinstance(evt, dict):
+            landmarks = evt.get("landmarks")
+        snap = {"evt": evt, "frame": frame, "landmarks": landmarks}
+        nose_click = (
+            float(calib_point.nose_target_x)
+            if calib_point.nose_target_x is not None
+            else float(calib_point.screen_x),
+            float(calib_point.nose_target_y)
+            if calib_point.nose_target_y is not None
+            else float(calib_point.screen_y),
+        )
+        img, err = build_camera_capture_marked_image(
+            snap,
+            overlay_w=float(self.display["width"]),
+            overlay_h=float(self.display["height"]),
+            click_pos=nose_click,
+            draw_click=True,
+            draw_info_panel=True,
+        )
+        if img is not None:
+            cv2.imwrite(str(png_path), img)
+        elif err:
+            logger.warning("Calibration datapoint image failed for %s: %s", name, err)
+
+        payload = {
+            "timestamp_ms": timestamp_ms,
+            "name": name,
+            "target": {
+                "screen_x": float(calib_point.screen_x),
+                "screen_y": float(calib_point.screen_y),
+                "nose_x": calib_point.nose_target_x,
+                "nose_y": calib_point.nose_target_y,
+                "eye_x": calib_point.eye_target_x,
+                "eye_y": calib_point.eye_target_y,
+            },
+            "head": {
+                "yaw": calib_point.head_yaw,
+                "pitch": calib_point.head_pitch,
+                "x_mm": calib_point.head_x,
+                "y_mm": calib_point.head_y,
+                "z_mm": calib_point.head_z,
+                "zeta_mm": calib_point.zeta,
+            },
+            "gaze": {
+                "raw_eye_yaw": calib_point.raw_eye_yaw,
+                "raw_eye_pitch": calib_point.raw_eye_pitch,
+                "raw_left_eye_yaw": calib_point.raw_left_eye_yaw,
+                "raw_left_eye_pitch": calib_point.raw_left_eye_pitch,
+                "raw_right_eye_yaw": calib_point.raw_right_eye_yaw,
+                "raw_right_eye_pitch": calib_point.raw_right_eye_pitch,
+            },
+            "sample_count": calib_point.sample_count,
+        }
+        if calibrated_evt is not None:
+            payload["calibrated_gaze"] = {
+                "gaze_x": getattr(calibrated_evt, "gaze_x", None),
+                "gaze_y": getattr(calibrated_evt, "gaze_y", None),
+            }
+        try:
+            with json_path.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2)
+        except OSError as exc:
+            logger.warning("Calibration datapoint JSON failed for %s: %s", name, exc)
 
     def _transition_state(self, new_state: DispatcherState) -> None:
         if self.state_machine is None:
@@ -621,6 +713,14 @@ class FrameDispatcher:
                         f"eye=({calib_point.raw_eye_yaw:.2f}, {calib_point.raw_eye_pitch:.2f}) "
                         f"zeta={calib_point.zeta:.2f}",
                         flush=True,
+                    )
+
+                    self._save_calibration_datapoint(
+                        calib_point=calib_point,
+                        evt=evt,
+                        frame=frame,
+                        calibrated_evt=calibrated_evt,
+                        timestamp_ms=timestamp_ms,
                     )
 
                 if completed:

@@ -1,0 +1,33 @@
+{
+  "timestamp_ms": 1776380013106,
+  "name": "TL",
+  "target": {
+    "screen_x": 2510.0,
+    "screen_y": 1390.0,
+    "nose_x": 50,
+    "nose_y": 50,
+    "eye_x": 2510,
+    "eye_y": 1390
+  },
+  "head": {
+    "yaw": -11.630750066287021,
+    "pitch": 5.409925365913644,
+    "x_mm": 124.96240145400608,
+    "y_mm": -100.47065749564972,
+    "z_mm": 786.6752256342445,
+    "zeta_mm": 786.6752256342445
+  },
+  "gaze": {
+    "raw_eye_yaw": 18.428690362298255,
+    "raw_eye_pitch": -10.076607978299851,
+    "raw_left_eye_yaw": 33.51501214837465,
+    "raw_left_eye_pitch": -10.82370156621209,
+    "raw_right_eye_yaw": 3.342368576221856,
+    "raw_right_eye_pitch": -9.329514390387613
+  },
+  "sample_count": 20,
+  "calibrated_gaze": {
+    "gaze_x": null,
+    "gaze_y": null
+  }
+}

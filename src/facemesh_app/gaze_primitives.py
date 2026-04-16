@@ -64,18 +64,15 @@ def _origin(
 def _angles_to_direction(yaw_deg: float, pitch_deg: float) -> np.ndarray:
     yaw = math.radians(float(yaw_deg))
     pitch = math.radians(float(pitch_deg))
-    direction = np.array(
+    cp = math.cos(pitch)
+    return np.array(
         [
-            math.tan(yaw),
-            -math.tan(pitch),
-            -1.0,
+            math.sin(yaw) * cp,
+            -math.sin(pitch),
+            -math.cos(yaw) * cp,
         ],
         dtype=float,
     )
-    norm = float(np.linalg.norm(direction))
-    if norm <= 1e-9:
-        return np.array([0.0, 0.0, -1.0], dtype=float)
-    return direction / norm
 
 
 def _project_to_screen_offsets(
@@ -366,8 +363,10 @@ def screen_xy_to_head_angles(
     if direction_norm <= 1e-9:
         return None
     direction = direction / direction_norm
+    sin_pitch = -float(direction[1])
+    sin_pitch = max(-1.0, min(1.0, sin_pitch))
+    pitch = math.degrees(math.asin(sin_pitch))
     yaw = math.degrees(math.atan2(float(direction[0]), -float(direction[2])))
-    pitch = -math.degrees(math.atan2(float(direction[1]), -float(direction[2])))
     return float(yaw), float(pitch)
 
 

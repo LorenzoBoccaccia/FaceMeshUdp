@@ -2,6 +2,7 @@
 Calibration overlay window for 9-point calibration flow.
 """
 
+import math
 import os
 import time
 from typing import Dict, List, Optional, Tuple
@@ -10,6 +11,7 @@ import pygame
 
 from .calibration import CalibrationPoint
 from .facemesh_dao import safe_float
+from .gaze_primitives import screen_xy_to_head_angles
 from .overlay_common import (
     BLACK,
     BLUE,
@@ -22,10 +24,26 @@ from .overlay_common import (
 
 
 CALIB_INSET = 50
-CALIB_BLINK_MS = 2000
-CALIB_COUNTDOWN_MS = 2000
+CALIB_BLINK_MIN_MS = 600
+CALIB_COUNTDOWN_MS = 1000
 CALIB_AVG_MS = 1000
 CALIB_BLINK_PERIOD_MS = 220
+CALIB_ALIGNMENT_WINDOW_MS = 500
+CALIB_ALIGNMENT_HOLD_MS = 400
+CALIB_ALIGNMENT_STABILITY_DEG = 1.0
+CALIB_ALIGNMENT_TOLERANCE_DEG = 3.0
+CALIB_ALIGNMENT_RING_SCALE = 1.5
+CALIB_ARROW_PIXELS_PER_DEG = 30.0
+CALIB_ARROW_MIN_DEG = 0.3
+CALIB_ARROW_MAX_PX = 260.0
+
+
+def _signum(value: float, eps: float = 1e-6) -> int:
+    if value > eps:
+        return 1
+    if value < -eps:
+        return -1
+    return 0
 
 
 class CalibrationOverlayManager:
@@ -40,6 +58,12 @@ class CalibrationOverlayManager:
         self._overlay_fps = overlay_fps
         self._width = int(display["width"])
         self._height = int(display["height"])
+        self._width_mm = float(display.get("width_mm", 0) or 0.0)
+        self._height_mm = float(display.get("height_mm", 0) or 0.0)
+        if self._width_mm <= 0.0 or self._height_mm <= 0.0:
+            fallback_mm_per_px = 0.25
+            self._width_mm = self._width * fallback_mm_per_px
+            self._height_mm = self._height * fallback_mm_per_px
 
         self._screen = None
         self._clock = None
@@ -54,6 +78,20 @@ class CalibrationOverlayManager:
         self._calib_phase: str = "idle"
         self._calib_phase_start: int = 0
         self._calib_samples: List[Dict] = []
+        self._center_x: float = 0.0
+        self._center_y: float = 0.0
+        self._recent_head_samples: List[Tuple[int, float, float, float, float, float]] = []
+        self._alignment_start_ms: Optional[int] = None
+        self._alignment_active: bool = False
+        self._c_baseline_yaw: Optional[float] = None
+        self._c_baseline_pitch: Optional[float] = None
+        self._c_head_x: Optional[float] = None
+        self._c_head_y: Optional[float] = None
+        self._c_head_z: Optional[float] = None
+        self._screen_center_cam_x: Optional[float] = None
+        self._screen_center_cam_y: Optional[float] = None
+        self._alignment_error_yaw: Optional[float] = None
+        self._alignment_error_pitch: Optional[float] = None
 
     def initialize(self):
         """Create and configure calibration overlay window."""
@@ -116,6 +154,20 @@ class CalibrationOverlayManager:
         self._calib_phase = "blink_pre"
         self._calib_phase_start = int(time.time() * 1000)
         self._calib_samples = []
+        self._center_x = float(width) / 2.0
+        self._center_y = float(height) / 2.0
+        self._recent_head_samples = []
+        self._alignment_start_ms = None
+        self._alignment_active = False
+        self._c_baseline_yaw = None
+        self._c_baseline_pitch = None
+        self._c_head_x = None
+        self._c_head_y = None
+        self._c_head_z = None
+        self._screen_center_cam_x = None
+        self._screen_center_cam_y = None
+        self._alignment_error_yaw = None
+        self._alignment_error_pitch = None
 
     def get_current_calib_point(self) -> Optional[Dict]:
         """Return current calibration target."""
@@ -126,6 +178,122 @@ class CalibrationOverlayManager:
     def get_calibration_phase(self) -> str:
         """Return current calibration phase."""
         return self._calib_phase
+
+    def _evaluate_alignment(
+        self, evt: Optional[Dict], current_time: int, current_point: Dict
+    ) -> bool:
+        """Return True when head pose is stable and pointing at the current target.
+
+        For the center point (C) we capture whatever head pose the user
+        presents — it defines both the camera→monitor angular offset and the
+        screen-center position in camera-mm. For every other point we trust
+        head_z (camera mm) and the corrected face angle, project the ray onto
+        the screen plane at z=0, and compare to the target pixel converted to
+        mm via the monitor's physical size reported by the OS.
+        """
+        if not evt:
+            self._recent_head_samples.clear()
+            self._alignment_error_yaw = None
+            self._alignment_error_pitch = None
+            return False
+        head_yaw = safe_float(evt.get("head_yaw"), float("nan"))
+        head_pitch = safe_float(evt.get("head_pitch"), float("nan"))
+        head_x = safe_float(evt.get("head_x"), float("nan"))
+        head_y = safe_float(evt.get("head_y"), float("nan"))
+        head_z = safe_float(evt.get("head_z"), float("nan"))
+        if not all(
+            math.isfinite(v) for v in (head_yaw, head_pitch, head_x, head_y, head_z)
+        ):
+            self._recent_head_samples.clear()
+            self._alignment_error_yaw = None
+            self._alignment_error_pitch = None
+            return False
+
+        self._recent_head_samples.append(
+            (current_time, head_yaw, head_pitch, head_x, head_y, head_z)
+        )
+        cutoff = current_time - CALIB_ALIGNMENT_WINDOW_MS
+        self._recent_head_samples = [
+            entry for entry in self._recent_head_samples if entry[0] >= cutoff
+        ]
+        if len(self._recent_head_samples) < 5:
+            self._alignment_error_yaw = None
+            self._alignment_error_pitch = None
+            return False
+
+        n = len(self._recent_head_samples)
+        mean_yaw = sum(s[1] for s in self._recent_head_samples) / n
+        mean_pitch = sum(s[2] for s in self._recent_head_samples) / n
+        var_yaw = sum((s[1] - mean_yaw) ** 2 for s in self._recent_head_samples) / n
+        var_pitch = (
+            sum((s[2] - mean_pitch) ** 2 for s in self._recent_head_samples) / n
+        )
+
+        is_center = current_point.get("name") == "C"
+
+        if is_center:
+            self._alignment_error_yaw = None
+            self._alignment_error_pitch = None
+            error_yaw = 0.0
+            error_pitch = 0.0
+        elif (
+            self._screen_center_cam_x is None
+            or self._screen_center_cam_y is None
+            or head_z <= 0.0
+        ):
+            self._alignment_error_yaw = None
+            self._alignment_error_pitch = None
+            return False
+        else:
+            nose_x = safe_float(current_point.get("nose_x"), self._center_x)
+            nose_y = safe_float(current_point.get("nose_y"), self._center_y)
+            angles = screen_xy_to_head_angles(
+                screen_x=nose_x,
+                screen_y=nose_y,
+                head_x=head_x,
+                head_y=head_y,
+                head_z=head_z,
+                center_zeta=head_z,
+                screen_center_cam_x=self._screen_center_cam_x,
+                screen_center_cam_y=self._screen_center_cam_y,
+                screen_center_cam_z=0.0,
+                screen_axis_x_x=1.0,
+                screen_axis_x_y=0.0,
+                screen_axis_x_z=0.0,
+                screen_axis_y_x=0.0,
+                screen_axis_y_y=1.0,
+                screen_axis_y_z=0.0,
+                screen_fit_rmse=0.0,
+                screen_scale_x=float(self._width) / self._width_mm,
+                screen_scale_y=float(self._height) / self._height_mm,
+                origin_x=self._center_x,
+                origin_y=self._center_y,
+            )
+            if angles is None:
+                self._alignment_error_yaw = None
+                self._alignment_error_pitch = None
+                return False
+            expected_yaw, expected_pitch = angles
+            error_yaw = expected_yaw - head_yaw
+            error_pitch = expected_pitch - head_pitch
+            self._alignment_error_yaw = error_yaw
+            self._alignment_error_pitch = error_pitch
+
+        if math.sqrt(var_yaw) > CALIB_ALIGNMENT_STABILITY_DEG:
+            return False
+        if math.sqrt(var_pitch) > CALIB_ALIGNMENT_STABILITY_DEG:
+            return False
+        if is_center:
+            return True
+        if abs(error_yaw) > CALIB_ALIGNMENT_TOLERANCE_DEG:
+            return False
+        if abs(error_pitch) > CALIB_ALIGNMENT_TOLERANCE_DEG:
+            return False
+        return True
+
+    def is_aligned(self) -> bool:
+        """Expose alignment status so rendering can show confirmation ring."""
+        return self._alignment_active
 
     def update_calibration_state(
         self, evt: Dict
@@ -140,9 +308,28 @@ class CalibrationOverlayManager:
             return True, None
 
         if self._calib_phase == "blink_pre":
-            if elapsed_ms >= CALIB_BLINK_MS:
+            aligned = self._evaluate_alignment(evt, current_time, current_point)
+            if aligned:
+                if self._alignment_start_ms is None:
+                    self._alignment_start_ms = current_time
+                self._alignment_active = True
+                hold_ms = current_time - self._alignment_start_ms
+                ready = (
+                    hold_ms >= CALIB_ALIGNMENT_HOLD_MS
+                    and elapsed_ms >= CALIB_BLINK_MIN_MS
+                )
+            else:
+                self._alignment_start_ms = None
+                self._alignment_active = False
+                ready = False
+            if ready:
                 self._calib_phase = "countdown"
                 self._calib_phase_start = current_time
+                self._alignment_active = False
+                self._alignment_start_ms = None
+                self._recent_head_samples.clear()
+                self._alignment_error_yaw = None
+                self._alignment_error_pitch = None
 
         elif self._calib_phase == "countdown":
             if elapsed_ms >= CALIB_COUNTDOWN_MS:
@@ -290,21 +477,35 @@ class CalibrationOverlayManager:
                         eye_target_y=current_point.get("eye_y"),
                     )
 
-                self._calib_phase = "blink_post"
-                self._calib_phase_start = current_time
-                return False, calib_point
+                if current_point["name"] == "C":
+                    self._c_baseline_yaw = safe_float(calib_point.head_yaw, 0.0)
+                    self._c_baseline_pitch = safe_float(calib_point.head_pitch, 0.0)
+                    self._c_head_x = safe_float(calib_point.head_x, 0.0)
+                    self._c_head_y = safe_float(calib_point.head_y, 0.0)
+                    self._c_head_z = safe_float(
+                        calib_point.head_z, safe_float(calib_point.zeta, 0.0)
+                    )
+                    self._screen_center_cam_x = self._c_head_x + self._c_head_z * math.tan(
+                        math.radians(self._c_baseline_yaw)
+                    )
+                    self._screen_center_cam_y = self._c_head_y - self._c_head_z * math.tan(
+                        math.radians(self._c_baseline_pitch)
+                    )
 
-        elif self._calib_phase == "blink_post":
-            if elapsed_ms >= CALIB_BLINK_MS:
                 self._current_calib_idx += 1
-                current_point = self.get_current_calib_point()
-
-                if current_point is None:
-                    return True, None
+                next_point = self.get_current_calib_point()
+                if next_point is None:
+                    return True, calib_point
 
                 self._calib_phase = "blink_pre"
                 self._calib_phase_start = current_time
                 self._calib_samples = []
+                self._recent_head_samples.clear()
+                self._alignment_start_ms = None
+                self._alignment_active = False
+                self._alignment_error_yaw = None
+                self._alignment_error_pitch = None
+                return False, calib_point
 
         return False, None
 
@@ -315,10 +516,13 @@ class CalibrationOverlayManager:
         elapsed_ms: int,
     ):
         """Render calibration target for current phase."""
+        aligned = phase == "blink_pre" and self._alignment_active
         if phase == "countdown":
             dot_color = RED
         elif phase == "sampling":
             dot_color = BLUE
+        elif aligned:
+            dot_color = WHITE
         else:
             if (elapsed_ms // CALIB_BLINK_PERIOD_MS) % 2 == 0:
                 dot_color = WHITE
@@ -336,6 +540,14 @@ class CalibrationOverlayManager:
             pygame.draw.circle(self._screen, WHITE, (nose_x, nose_y), DOT_RADIUS + 2, 2)
             pygame.draw.circle(self._screen, eye_color, (eye_x, eye_y), DOT_RADIUS)
             pygame.draw.circle(self._screen, WHITE, (eye_x, eye_y), DOT_RADIUS + 2, 2)
+            if aligned:
+                ring_radius = int(round(DOT_RADIUS * CALIB_ALIGNMENT_RING_SCALE))
+                pygame.draw.circle(
+                    self._screen, WHITE, (nose_x, nose_y), ring_radius, 2
+                )
+
+        if phase == "blink_pre" and not aligned:
+            self._draw_alignment_arrow()
 
         instruction = current_point.get("instruction", "")
         label = f"{self._current_calib_idx + 1}/{len(self._calibration_sequence)}"
@@ -343,6 +555,44 @@ class CalibrationOverlayManager:
         text_surface = self._font.render(text, True, WHITE)
         text_rect = text_surface.get_rect(center=(self._width // 2, 40))
         self._screen.blit(text_surface, text_rect)
+
+    def _draw_alignment_arrow(self) -> None:
+        """Draw a center-screen arrow showing which direction to turn the nose."""
+        err_yaw = self._alignment_error_yaw
+        err_pitch = self._alignment_error_pitch
+        if err_yaw is None or err_pitch is None:
+            return
+        magnitude_deg = math.hypot(err_yaw, err_pitch)
+        if magnitude_deg < CALIB_ARROW_MIN_DEG:
+            return
+        dx = err_yaw * CALIB_ARROW_PIXELS_PER_DEG
+        dy = -err_pitch * CALIB_ARROW_PIXELS_PER_DEG
+        length_px = math.hypot(dx, dy)
+        if length_px > CALIB_ARROW_MAX_PX:
+            scale = CALIB_ARROW_MAX_PX / length_px
+            dx *= scale
+            dy *= scale
+            length_px = CALIB_ARROW_MAX_PX
+        start = (int(round(self._center_x)), int(round(self._center_y)))
+        end = (int(round(self._center_x + dx)), int(round(self._center_y + dy)))
+        pygame.draw.line(self._screen, WHITE, start, end, 4)
+        heading = math.atan2(dy, dx)
+        head_len = max(12.0, min(24.0, length_px * 0.3))
+        wing_angle = math.radians(28.0)
+        for sign in (-1, 1):
+            angle = heading + math.pi - sign * wing_angle
+            wing_end = (
+                int(round(end[0] + head_len * math.cos(angle))),
+                int(round(end[1] + head_len * math.sin(angle))),
+            )
+            pygame.draw.line(self._screen, WHITE, end, wing_end, 4)
+        label = f"{magnitude_deg:.1f}°"
+        label_surface = self._font.render(label, True, WHITE)
+        label_offset = 16
+        label_rect = label_surface.get_rect(
+            center=(end[0], end[1] - label_offset if dy >= 0 else end[1] + label_offset)
+        )
+        self._screen.blit(label_surface, label_rect)
 
     def _make_calib_seq(self, width: float, height: float) -> List[Dict]:
         """Generate the calibration target list."""

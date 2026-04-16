@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from .facemesh_dao import FaceMeshEvent, safe_float
-from .gaze_primitives import project_head_angles_to_screen_xy
+from .gaze_primitives import project_head_angles_to_screen_xy, screen_xy_to_head_angles
 
 
 logger = logging.getLogger(__name__)
@@ -92,18 +92,29 @@ def _build_screen_geometry(
     center_point: CalibrationPoint,
     center_zeta: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Screen plane at z=0 in camera frame.
+
+    The screen center is where the C head-forward ray lands on the monitor
+    plane. Head position at C is offset from the camera axis, so the monitor
+    center in camera coordinates must be derived from the head position AND
+    the head's absolute yaw/pitch at C — not assumed to be directly in front
+    of the head.
+    """
+    _ = center_zeta
     center_head_x = safe_float(getattr(center_point, "head_x", 0.0), 0.0)
     center_head_y = safe_float(getattr(center_point, "head_y", 0.0), 0.0)
-    center_head_z = _positive_or(getattr(center_point, "head_z", center_zeta), center_zeta)
-    depth = _positive_or(center_zeta, DEFAULT_CENTER_ZETA)
-    screen_center = np.array(
-        [
-            center_head_x,
-            center_head_y,
-            center_head_z - depth,
-        ],
-        dtype=float,
+    center_head_z = _positive_or(
+        getattr(center_point, "head_z", DEFAULT_CENTER_ZETA), DEFAULT_CENTER_ZETA
     )
+    center_head_yaw = safe_float(getattr(center_point, "head_yaw", 0.0), 0.0)
+    center_head_pitch = safe_float(getattr(center_point, "head_pitch", 0.0), 0.0)
+    screen_center_x = center_head_x + center_head_z * math.tan(
+        math.radians(center_head_yaw)
+    )
+    screen_center_y = center_head_y - center_head_z * math.tan(
+        math.radians(center_head_pitch)
+    )
+    screen_center = np.array([screen_center_x, screen_center_y, 0.0], dtype=float)
     screen_axis_x = np.array([1.0, 0.0, 0.0], dtype=float)
     screen_axis_y = np.array([0.0, 1.0, 0.0], dtype=float)
     return screen_center, screen_axis_x, screen_axis_y
@@ -183,8 +194,6 @@ def _resolve_screen_scale(
 ) -> Tuple[float, float]:
     origin_x = safe_float(center_point.screen_x, 0.0)
     origin_y = safe_float(center_point.screen_y, 0.0)
-    center_head_yaw = safe_float(getattr(center_point, "head_yaw", 0.0), 0.0)
-    center_head_pitch = safe_float(getattr(center_point, "head_pitch", 0.0), 0.0)
 
     scale_x_samples: List[float] = []
     scale_y_samples: List[float] = []
@@ -196,11 +205,11 @@ def _resolve_screen_scale(
         head_x = safe_float(getattr(point, "head_x", 0.0), 0.0)
         head_y = safe_float(getattr(point, "head_y", 0.0), 0.0)
         head_z = _positive_or(getattr(point, "head_z", center_zeta), center_zeta)
-        face_delta_yaw = safe_float(getattr(point, "head_yaw", 0.0), 0.0) - center_head_yaw
-        face_delta_pitch = safe_float(getattr(point, "head_pitch", 0.0), 0.0) - center_head_pitch
+        head_yaw = safe_float(getattr(point, "head_yaw", 0.0), 0.0)
+        head_pitch = safe_float(getattr(point, "head_pitch", 0.0), 0.0)
         projected = project_head_angles_to_screen_xy(
-            yaw_deg=face_delta_yaw,
-            pitch_deg=face_delta_pitch,
+            yaw_deg=head_yaw,
+            pitch_deg=head_pitch,
             head_x=head_x,
             head_y=head_y,
             head_z=head_z,
@@ -247,20 +256,24 @@ def _interpolate_coefficient(
     negative_coefficient: float,
     positive_coefficient: float,
 ) -> float:
-    span = axis_max - axis_min
-    if abs(span) <= 1e-9:
-        return 0.5 * (
-            _positive_coefficient(negative_coefficient, 1.0)
-            + _positive_coefficient(positive_coefficient, 1.0)
-        )
-    t = (eye_delta - axis_min) / span
-    if t < 0.0:
-        t = 0.0
-    elif t > 1.0:
-        t = 1.0
     c_neg = _positive_coefficient(negative_coefficient, 1.0)
     c_pos = _positive_coefficient(positive_coefficient, 1.0)
-    return c_neg + (c_pos - c_neg) * t
+    mid = 0.5 * (c_neg + c_pos)
+    if eye_delta >= 0.0:
+        span = axis_max
+        if span <= 1e-9:
+            return c_pos
+        t = eye_delta / span
+        if t > 1.0:
+            t = 1.0
+        return mid + (c_pos - mid) * t
+    span = -axis_min
+    if span <= 1e-9:
+        return c_neg
+    t = (-eye_delta) / span
+    if t > 1.0:
+        t = 1.0
+    return mid + (c_neg - mid) * t
 
 
 def _fit_linear_scalar(inputs: List[float], targets: List[float]) -> float:
@@ -279,6 +292,49 @@ def _fit_linear_scalar(inputs: List[float], targets: List[float]) -> float:
     if denom <= 1e-9:
         return 0.0
     return float(np.dot(x, y) / denom)
+
+
+def _target_eye_angles(
+    point: CalibrationPoint,
+    center_point: CalibrationPoint,
+    center_zeta: float,
+    screen_center_cam: np.ndarray,
+    screen_axis_x: np.ndarray,
+    screen_axis_y: np.ndarray,
+) -> Optional[Tuple[float, float]]:
+    eye_target_x = point.eye_target_x if point.eye_target_x is not None else point.screen_x
+    eye_target_y = point.eye_target_y if point.eye_target_y is not None else point.screen_y
+    head_x = safe_float(getattr(point, "head_x", 0.0), 0.0)
+    head_y = safe_float(getattr(point, "head_y", 0.0), 0.0)
+    head_z = _positive_or(getattr(point, "head_z", center_zeta), center_zeta)
+    angles = screen_xy_to_head_angles(
+        screen_x=eye_target_x,
+        screen_y=eye_target_y,
+        head_x=head_x,
+        head_y=head_y,
+        head_z=head_z,
+        center_zeta=center_zeta,
+        screen_center_cam_x=float(screen_center_cam[0]),
+        screen_center_cam_y=float(screen_center_cam[1]),
+        screen_center_cam_z=float(screen_center_cam[2]),
+        screen_axis_x_x=float(screen_axis_x[0]),
+        screen_axis_x_y=float(screen_axis_x[1]),
+        screen_axis_x_z=float(screen_axis_x[2]),
+        screen_axis_y_x=float(screen_axis_y[0]),
+        screen_axis_y_y=float(screen_axis_y[1]),
+        screen_axis_y_z=float(screen_axis_y[2]),
+        screen_fit_rmse=0.0,
+        screen_scale_x=1.0,
+        screen_scale_y=1.0,
+        origin_x=safe_float(center_point.screen_x, 0.0),
+        origin_y=safe_float(center_point.screen_y, 0.0),
+    )
+    if angles is None:
+        return None
+    head_yaw = safe_float(getattr(point, "head_yaw", 0.0), 0.0)
+    head_pitch = safe_float(getattr(point, "head_pitch", 0.0), 0.0)
+    true_yaw, true_pitch = angles
+    return true_yaw - head_yaw, true_pitch - head_pitch
 
 
 def _signum(value: float, eps: float = 1e-6) -> int:
@@ -356,29 +412,30 @@ def compute_calibration_matrix(points: List[CalibrationPoint]) -> CalibrationMat
         eye_yaw_samples.append(eye_delta_yaw)
         eye_pitch_samples.append(eye_delta_pitch)
 
-        if abs(eye_delta_yaw) > 1e-6 and abs(face_delta_yaw) > 1e-6:
-            ratio_yaw = abs(face_delta_yaw / eye_delta_yaw)
-            bucket_yaw_sign = (
-                expected_eye_yaw_sign
-                if expected_eye_yaw_sign != 0
-                else _signum(eye_delta_yaw)
-            )
-            if bucket_yaw_sign >= 0:
-                yaw_positive_samples.append(ratio_yaw)
-            else:
-                yaw_negative_samples.append(ratio_yaw)
-
-        if abs(eye_delta_pitch) > 1e-6 and abs(face_delta_pitch) > 1e-6:
-            ratio_pitch = abs(face_delta_pitch / eye_delta_pitch)
-            bucket_pitch_sign = (
-                expected_eye_pitch_sign
-                if expected_eye_pitch_sign != 0
-                else _signum(eye_delta_pitch)
-            )
-            if bucket_pitch_sign >= 0:
-                pitch_positive_samples.append(ratio_pitch)
-            else:
-                pitch_negative_samples.append(ratio_pitch)
+        target_eye = _target_eye_angles(
+            point=point,
+            center_point=center_point,
+            center_zeta=center_zeta,
+            screen_center_cam=screen_center_cam,
+            screen_axis_x=screen_axis_x,
+            screen_axis_y=screen_axis_y,
+        )
+        if target_eye is not None:
+            target_eye_yaw, target_eye_pitch = target_eye
+            if abs(eye_delta_yaw) > 1e-6:
+                ratio_yaw = target_eye_yaw / eye_delta_yaw
+                if math.isfinite(ratio_yaw) and ratio_yaw > 1e-6:
+                    if eye_delta_yaw >= 0.0:
+                        yaw_positive_samples.append(ratio_yaw)
+                    else:
+                        yaw_negative_samples.append(ratio_yaw)
+            if abs(eye_delta_pitch) > 1e-6:
+                ratio_pitch = target_eye_pitch / eye_delta_pitch
+                if math.isfinite(ratio_pitch) and ratio_pitch > 1e-6:
+                    if eye_delta_pitch >= 0.0:
+                        pitch_positive_samples.append(ratio_pitch)
+                    else:
+                        pitch_negative_samples.append(ratio_pitch)
 
         if (
             expected_face_yaw_sign != 0
@@ -392,14 +449,19 @@ def compute_calibration_matrix(points: List[CalibrationPoint]) -> CalibrationMat
             and _signum(face_delta_pitch) != expected_face_pitch_sign
         ):
             sign_issues.append(f"{point.name}: face pitch sign mismatch")
+        eye_tracking_reliable = (
+            abs(face_delta_yaw) < 20.0 and abs(face_delta_pitch) < 20.0
+        )
         if (
-            expected_eye_yaw_sign != 0
+            eye_tracking_reliable
+            and expected_eye_yaw_sign != 0
             and abs(eye_delta_yaw) > 0.5
             and _signum(eye_delta_yaw) != expected_eye_yaw_sign
         ):
             sign_issues.append(f"{point.name}: eye yaw sign mismatch")
         if (
-            expected_eye_pitch_sign != 0
+            eye_tracking_reliable
+            and expected_eye_pitch_sign != 0
             and abs(eye_delta_pitch) > 0.5
             and _signum(eye_delta_pitch) != expected_eye_pitch_sign
         ):
@@ -432,8 +494,17 @@ def compute_calibration_matrix(points: List[CalibrationPoint]) -> CalibrationMat
             continue
         eye_delta_yaw = safe_float(point.raw_eye_yaw, 0.0) - center_eye_yaw
         eye_delta_pitch = safe_float(point.raw_eye_pitch, 0.0) - center_eye_pitch
-        face_delta_yaw = safe_float(getattr(point, "head_yaw", 0.0), 0.0) - center_head_yaw
-        face_delta_pitch = safe_float(getattr(point, "head_pitch", 0.0), 0.0) - center_head_pitch
+        target_eye = _target_eye_angles(
+            point=point,
+            center_point=center_point,
+            center_zeta=center_zeta,
+            screen_center_cam=screen_center_cam,
+            screen_axis_x=screen_axis_x,
+            screen_axis_y=screen_axis_y,
+        )
+        if target_eye is None:
+            continue
+        target_eye_yaw, target_eye_pitch = target_eye
         yaw_coeff_point = _interpolate_coefficient(
             eye_delta=eye_delta_yaw,
             axis_min=eye_yaw_min,
@@ -449,9 +520,9 @@ def compute_calibration_matrix(points: List[CalibrationPoint]) -> CalibrationMat
             positive_coefficient=pitch_positive,
         )
         yaw_cross_inputs.append(eye_delta_pitch)
-        yaw_cross_targets.append((-face_delta_yaw) - (yaw_coeff_point * eye_delta_yaw))
+        yaw_cross_targets.append(target_eye_yaw - yaw_coeff_point * eye_delta_yaw)
         pitch_cross_inputs.append(eye_delta_yaw)
-        pitch_cross_targets.append((-face_delta_pitch) - (pitch_coeff_point * eye_delta_pitch))
+        pitch_cross_targets.append(target_eye_pitch - pitch_coeff_point * eye_delta_pitch)
     yaw_from_pitch_coupling = _fit_linear_scalar(yaw_cross_inputs, yaw_cross_targets)
     pitch_from_yaw_coupling = _fit_linear_scalar(pitch_cross_inputs, pitch_cross_targets)
     screen_scale_x, screen_scale_y = _resolve_screen_scale(
@@ -925,9 +996,11 @@ def apply_calibration_model(
     screen_offset_y = None
     screen_projection_t = None
     screen_depth = _positive_or(head_z_value, DEFAULT_CENTER_ZETA)
+    absolute_gaze_yaw = head_yaw_value + corrected_eye_yaw
+    absolute_gaze_pitch = head_pitch_value + corrected_eye_pitch
     projected = project_head_angles_to_screen_xy(
-        yaw_deg=corrected_yaw_linear,
-        pitch_deg=corrected_pitch_linear,
+        yaw_deg=absolute_gaze_yaw,
+        pitch_deg=absolute_gaze_pitch,
         head_x=head_x_value,
         head_y=head_y_value,
         head_z=head_z_value,

@@ -500,6 +500,7 @@ class OverlayStep:
         try:
             face_event = calibrated_event.face_mesh_event
 
+            frame = frame.copy()
             frame_height, frame_width = frame.shape[:2]
             runtime_evt = {
                 "head_yaw": face_event.head_yaw if face_event else None,

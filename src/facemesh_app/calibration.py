@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from functools import cached_property
 import json
 import logging
 import math
@@ -1266,7 +1267,7 @@ class CalibratedFaceAndGazeEvent:
             return None
         return self.face_mesh_event.camera_z
 
-    @property
+    @cached_property
     def calibrated_components(self) -> Dict[str, Any]:
         return apply_calibration_model(
             raw_eye_yaw=self.raw_eye_yaw,

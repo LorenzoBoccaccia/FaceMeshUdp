@@ -563,7 +563,7 @@ class FrameDispatcher:
 
                 evt = self._process_frame(frame, timestamp_ms, pixel_format)
                 calibrated_evt, _ = self._run_pipeline_steps(
-                    frame.copy(), evt, run_downstream=True
+                    frame, evt, run_downstream=True
                 )
                 runtime_evt = enrich_runtime_evt(evt, calibrated_evt)
 

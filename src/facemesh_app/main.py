@@ -190,6 +190,11 @@ def parse_args():
 
 
 def main():
+    if os.getenv("FACEMESH_PROFILE") == "1" and not os.getenv("_FACEMESH_PROFILE_ACTIVE"):
+        os.environ["_FACEMESH_PROFILE_ACTIVE"] = "1"
+        _run_with_yappi()
+        return
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -390,6 +395,41 @@ def main():
         camera_reader.release()
         frame_dispatcher.stop()
         logger.info("Shutdown complete")
+
+
+def _run_with_yappi():
+    import yappi
+
+    yappi.set_clock_type("wall")
+    yappi.start(builtins=True)
+    try:
+        main()
+    finally:
+        yappi.stop()
+        out_dir = os.getenv("FACEMESH_PROFILE_DIR", "profile_out")
+        os.makedirs(out_dir, exist_ok=True)
+
+        func_stats = yappi.get_func_stats()
+        func_stats.save(os.path.join(out_dir, "yappi.pstat"), type="pstat")
+        func_stats.save(os.path.join(out_dir, "yappi.callgrind"), type="callgrind")
+
+        with open(os.path.join(out_dir, "yappi_top.txt"), "w") as f:
+            func_stats.sort("tsub", "desc").print_all(
+                out=f,
+                columns={
+                    0: ("name", 80),
+                    1: ("ncall", 10),
+                    2: ("tsub", 10),
+                    3: ("ttot", 10),
+                    4: ("tavg", 10),
+                },
+            )
+
+        thread_stats = yappi.get_thread_stats()
+        with open(os.path.join(out_dir, "yappi_threads.txt"), "w") as f:
+            thread_stats.print_all(out=f)
+
+        print(f"[yappi] profile written to {out_dir}/", file=sys.stderr)
 
 
 if __name__ == "__main__":

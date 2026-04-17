@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+from scipy.optimize import least_squares, lsq_linear
+from scipy.spatial.transform import Rotation
 
 from .facemesh_dao import FaceMeshEvent, safe_float
 from .gaze_primitives import project_head_angles_to_screen_xy, screen_xy_to_head_angles
@@ -15,7 +17,7 @@ from .gaze_primitives import project_head_angles_to_screen_xy, screen_xy_to_head
 logger = logging.getLogger(__name__)
 
 DEFAULT_CENTER_ZETA = 1200.0
-CALIBRATION_MODEL_VERSION = 9
+CALIBRATION_MODEL_VERSION = 10
 
 
 @dataclass(frozen=True)
@@ -88,36 +90,201 @@ def _positive_coefficient(v: Any, fallback: float) -> float:
     return x if math.isfinite(x) and x > 1e-9 else fallback
 
 
-def _build_screen_geometry(
-    center_point: CalibrationPoint,
-    center_zeta: float,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Screen plane at z=0 in camera frame.
+def _head_forward_direction(yaw_deg: float, pitch_deg: float) -> np.ndarray:
+    """Unit vector in camera frame for a head pointing at yaw/pitch."""
+    yaw = math.radians(float(yaw_deg))
+    pitch = math.radians(float(pitch_deg))
+    cp = math.cos(pitch)
+    return np.array(
+        [math.sin(yaw) * cp, -math.sin(pitch), -math.cos(yaw) * cp],
+        dtype=float,
+    )
 
-    The screen center is where the C head-forward ray lands on the monitor
-    plane. Head position at C is offset from the camera axis, so the monitor
-    center in camera coordinates must be derived from the head position AND
-    the head's absolute yaw/pitch at C — not assumed to be directly in front
-    of the head.
+
+def _fit_screen_geometry(
+    points: List[CalibrationPoint],
+    center_point: CalibrationPoint,
+    px_per_mm_x: Optional[float] = None,
+    px_per_mm_y: Optional[float] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, float, float]:
+    """Solve for screen pose from click-confirmed nose-aim samples.
+
+    Each sample gives ``h_i + t_i · d_i = c + u_i · A + v_i · B`` where
+    (u_i, v_i) is the red-dot pixel offset from the screen-centre pixel,
+    (h_i, d_i) is the head position and forward direction, and (c, A, B) is
+    the unknown screen origin with per-pixel axis vectors. An unconstrained
+    lstsq gives a warm start; when physical pixel scales are known, a
+    nonlinear refinement pins |A|, |B| to the OS-reported values and enforces
+    A ⊥ B so the plane is a physically realizable rectangular monitor.
     """
-    _ = center_zeta
-    center_head_x = safe_float(getattr(center_point, "head_x", 0.0), 0.0)
-    center_head_y = safe_float(getattr(center_point, "head_y", 0.0), 0.0)
-    center_head_z = _positive_or(
-        getattr(center_point, "head_z", DEFAULT_CENTER_ZETA), DEFAULT_CENTER_ZETA
-    )
-    center_head_yaw = safe_float(getattr(center_point, "head_yaw", 0.0), 0.0)
-    center_head_pitch = safe_float(getattr(center_point, "head_pitch", 0.0), 0.0)
-    screen_center_x = center_head_x + center_head_z * math.tan(
-        math.radians(center_head_yaw)
-    )
-    screen_center_y = center_head_y - center_head_z * math.tan(
-        math.radians(center_head_pitch)
-    )
-    screen_center = np.array([screen_center_x, screen_center_y, 0.0], dtype=float)
-    screen_axis_x = np.array([1.0, 0.0, 0.0], dtype=float)
-    screen_axis_y = np.array([0.0, 1.0, 0.0], dtype=float)
-    return screen_center, screen_axis_x, screen_axis_y
+    origin_x = safe_float(getattr(center_point, "nose_target_x", None), float("nan"))
+    if not math.isfinite(origin_x):
+        origin_x = safe_float(center_point.screen_x, 0.0)
+    origin_y = safe_float(getattr(center_point, "nose_target_y", None), float("nan"))
+    if not math.isfinite(origin_y):
+        origin_y = safe_float(center_point.screen_y, 0.0)
+
+    rows: List[Tuple[np.ndarray, float, float, float]] = []
+    for point in points:
+        nose_x_raw = point.nose_target_x
+        nose_y_raw = point.nose_target_y
+        if nose_x_raw is None or nose_y_raw is None:
+            nose_x = safe_float(point.screen_x, origin_x)
+            nose_y = safe_float(point.screen_y, origin_y)
+        else:
+            nose_x = safe_float(nose_x_raw, origin_x)
+            nose_y = safe_float(nose_y_raw, origin_y)
+        head_x = safe_float(getattr(point, "head_x", 0.0), 0.0)
+        head_y = safe_float(getattr(point, "head_y", 0.0), 0.0)
+        head_z = _positive_or(
+            getattr(point, "head_z", DEFAULT_CENTER_ZETA), DEFAULT_CENTER_ZETA
+        )
+        head = np.array([head_x, head_y, head_z], dtype=float)
+        direction = _head_forward_direction(
+            safe_float(getattr(point, "head_yaw", 0.0), 0.0),
+            safe_float(getattr(point, "head_pitch", 0.0), 0.0),
+        )
+        u = nose_x - origin_x
+        v = nose_y - origin_y
+        rows.append((head, direction, u, v))
+
+    n = len(rows)
+    if n < 9:
+        raise ValueError(f"Screen geometry fit requires 9 samples, got {n}")
+
+    matrix = np.zeros((3 * n, 9 + n), dtype=float)
+    target = np.zeros(3 * n, dtype=float)
+    for i, (head, direction, u, v) in enumerate(rows):
+        for axis in range(3):
+            row = 3 * i + axis
+            matrix[row, axis] = 1.0
+            matrix[row, 3 + axis] = u
+            matrix[row, 6 + axis] = v
+            matrix[row, 9 + i] = -direction[axis]
+            target[row] = head[axis]
+
+    rank = int(np.linalg.matrix_rank(matrix))
+    expected_rank = matrix.shape[1]
+    if rank < expected_rank:
+        raise ValueError(
+            f"Screen geometry fit is rank-deficient (rank={rank}, expected {expected_rank}); "
+            "calibration samples do not constrain the screen plane — "
+            "head must shift in Z across targets for the plane normal to be observable"
+        )
+
+    t_min = 1.0  # mm; picks the half-space where the nose ray hits screen
+    lower = np.full(9 + n, -np.inf, dtype=float)
+    upper = np.full(9 + n, np.inf, dtype=float)
+    lower[9:] = t_min
+
+    warm = lsq_linear(matrix, target, bounds=(lower, upper), method="bvls")
+    if not warm.success:
+        raise ValueError(
+            f"Screen geometry fit failed to converge: {warm.message}"
+        )
+    solution = warm.x
+    screen_center = solution[0:3]
+    a_vec = solution[3:6]
+    b_vec = solution[6:9]
+
+    a_norm = float(np.linalg.norm(a_vec))
+    if a_norm <= 1e-6:
+        raise ValueError("Screen geometry fit produced a degenerate X axis")
+    axis_x = a_vec / a_norm
+    scale_x = 1.0 / a_norm
+
+    b_ortho = b_vec - float(np.dot(b_vec, axis_x)) * axis_x
+    b_ortho_norm = float(np.linalg.norm(b_ortho))
+    if b_ortho_norm <= 1e-6:
+        raise ValueError("Screen geometry fit produced a degenerate Y axis")
+    axis_y = b_ortho / b_ortho_norm
+    scale_y = 1.0 / b_ortho_norm
+
+    if (
+        px_per_mm_x is not None
+        and px_per_mm_y is not None
+        and px_per_mm_x > 0
+        and px_per_mm_y > 0
+    ):
+        mm_per_px_x = 1.0 / float(px_per_mm_x)
+        mm_per_px_y = 1.0 / float(px_per_mm_y)
+
+        heads = np.stack([head for head, _d, _u, _v in rows])
+        dirs = np.stack([direction for _h, direction, _u, _v in rows])
+        uvs = np.array([(u, v) for _h, _d, u, v in rows])
+
+        # Seed rotation from warm-start axes, then re-orthonormalize.
+        seed_axis_x = axis_x
+        seed_axis_y = axis_y - float(np.dot(axis_y, seed_axis_x)) * seed_axis_x
+        seed_axis_y_norm = float(np.linalg.norm(seed_axis_y))
+        if seed_axis_y_norm > 1e-6:
+            seed_axis_y = seed_axis_y / seed_axis_y_norm
+        else:
+            seed_axis_y = np.array([0.0, 1.0, 0.0])
+        seed_axis_z = np.cross(seed_axis_x, seed_axis_y)
+        seed_rot = np.column_stack([seed_axis_x, seed_axis_y, seed_axis_z])
+        # Orthonormalize via SVD to guarantee a valid rotation matrix.
+        u_svd, _s_svd, vt_svd = np.linalg.svd(seed_rot)
+        r_init = u_svd @ vt_svd
+        if np.linalg.det(r_init) < 0:
+            u_svd[:, -1] *= -1.0
+            r_init = u_svd @ vt_svd
+        rot_vec0 = Rotation.from_matrix(r_init).as_rotvec()
+
+        t_warm = solution[9:]
+        t0 = np.clip(t_warm, t_min, None)
+
+        x0 = np.concatenate([screen_center, rot_vec0, t0])
+
+        def unpack(params: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+            c = params[0:3]
+            rotvec = params[3:6]
+            t_vals = params[6:]
+            rot = Rotation.from_rotvec(rotvec).as_matrix()
+            ax_x = rot[:, 0] * mm_per_px_x
+            ax_y = rot[:, 1] * mm_per_px_y
+            return c, ax_x, ax_y, t_vals
+
+        def residuals(params: np.ndarray) -> np.ndarray:
+            c, ax_x, ax_y, t_vals = unpack(params)
+            lhs = heads + t_vals[:, None] * dirs
+            rhs = c[None, :] + uvs[:, 0:1] * ax_x[None, :] + uvs[:, 1:2] * ax_y[None, :]
+            return (lhs - rhs).reshape(-1)
+
+        lb = np.concatenate(
+            [np.full(6, -np.inf), np.full(n, t_min)]
+        )
+        ub = np.full(6 + n, np.inf)
+
+        refined = least_squares(
+            residuals,
+            x0,
+            bounds=(lb, ub),
+            method="trf",
+            xtol=1e-10,
+            ftol=1e-10,
+            max_nfev=500,
+        )
+        if not refined.success and refined.status <= 0:
+            raise ValueError(
+                f"Constrained screen geometry refinement failed: {refined.message}"
+            )
+
+        c_ref, ax_x_ref, ax_y_ref, _t_ref = unpack(refined.x)
+        screen_center = c_ref
+        axis_x = ax_x_ref / np.linalg.norm(ax_x_ref)
+        axis_y = ax_y_ref / np.linalg.norm(ax_y_ref)
+        scale_x = float(px_per_mm_x)
+        scale_y = float(px_per_mm_y)
+        residual_vec = refined.fun
+    else:
+        residual_vec = matrix @ solution - target
+
+    per_point_sq = residual_vec.reshape(n, 3)
+    per_point_distance = np.sqrt(np.sum(per_point_sq * per_point_sq, axis=1))
+    fit_rmse = float(np.sqrt(float(np.mean(per_point_distance * per_point_distance))))
+
+    return screen_center, axis_x, axis_y, scale_x, scale_y, fit_rmse
 
 
 def _profile_token(raw_profile: str) -> str:
@@ -184,71 +351,6 @@ def _resolve_axis_extension(samples: List[float]) -> Tuple[float, float]:
     return axis_min, axis_max
 
 
-def _resolve_screen_scale(
-    points: List[CalibrationPoint],
-    center_point: CalibrationPoint,
-    center_zeta: float,
-    screen_center_cam: np.ndarray,
-    screen_axis_x: np.ndarray,
-    screen_axis_y: np.ndarray,
-) -> Tuple[float, float]:
-    origin_x = safe_float(center_point.screen_x, 0.0)
-    origin_y = safe_float(center_point.screen_y, 0.0)
-
-    scale_x_samples: List[float] = []
-    scale_y_samples: List[float] = []
-    for point in points:
-        if point.name == "C":
-            continue
-        if point.nose_target_x is None or point.nose_target_y is None:
-            continue
-        head_x = safe_float(getattr(point, "head_x", 0.0), 0.0)
-        head_y = safe_float(getattr(point, "head_y", 0.0), 0.0)
-        head_z = _positive_or(getattr(point, "head_z", center_zeta), center_zeta)
-        head_yaw = safe_float(getattr(point, "head_yaw", 0.0), 0.0)
-        head_pitch = safe_float(getattr(point, "head_pitch", 0.0), 0.0)
-        projected = project_head_angles_to_screen_xy(
-            yaw_deg=head_yaw,
-            pitch_deg=head_pitch,
-            head_x=head_x,
-            head_y=head_y,
-            head_z=head_z,
-            center_zeta=center_zeta,
-            screen_center_cam_x=float(screen_center_cam[0]),
-            screen_center_cam_y=float(screen_center_cam[1]),
-            screen_center_cam_z=float(screen_center_cam[2]),
-            screen_axis_x_x=float(screen_axis_x[0]),
-            screen_axis_x_y=float(screen_axis_x[1]),
-            screen_axis_x_z=float(screen_axis_x[2]),
-            screen_axis_y_x=float(screen_axis_y[0]),
-            screen_axis_y_y=float(screen_axis_y[1]),
-            screen_axis_y_z=float(screen_axis_y[2]),
-            screen_fit_rmse=0.0,
-            screen_scale_x=1.0,
-            screen_scale_y=1.0,
-            origin_x=origin_x,
-            origin_y=origin_y,
-        )
-        if projected is None:
-            continue
-        offset_x_base = safe_float(projected.get("screen_x"), origin_x) - origin_x
-        offset_y_base = safe_float(projected.get("screen_y"), origin_y) - origin_y
-        desired_offset_x = safe_float(point.nose_target_x, origin_x) - origin_x
-        desired_offset_y = safe_float(point.nose_target_y, origin_y) - origin_y
-        if abs(offset_x_base) > 1e-6:
-            candidate_x = desired_offset_x / offset_x_base
-            if math.isfinite(candidate_x) and candidate_x > 1e-6:
-                scale_x_samples.append(candidate_x)
-        if abs(offset_y_base) > 1e-6:
-            candidate_y = desired_offset_y / offset_y_base
-            if math.isfinite(candidate_y) and candidate_y > 1e-6:
-                scale_y_samples.append(candidate_y)
-
-    scale_x = float(np.median(np.array(scale_x_samples, dtype=float))) if scale_x_samples else 1.0
-    scale_y = float(np.median(np.array(scale_y_samples, dtype=float))) if scale_y_samples else 1.0
-    return _positive_or(scale_x, 1.0), _positive_or(scale_y, 1.0)
-
-
 def _interpolate_coefficient(
     eye_delta: float,
     axis_min: float,
@@ -301,12 +403,20 @@ def _target_eye_angles(
     screen_center_cam: np.ndarray,
     screen_axis_x: np.ndarray,
     screen_axis_y: np.ndarray,
+    screen_scale_x: float,
+    screen_scale_y: float,
 ) -> Optional[Tuple[float, float]]:
     eye_target_x = point.eye_target_x if point.eye_target_x is not None else point.screen_x
     eye_target_y = point.eye_target_y if point.eye_target_y is not None else point.screen_y
     head_x = safe_float(getattr(point, "head_x", 0.0), 0.0)
     head_y = safe_float(getattr(point, "head_y", 0.0), 0.0)
     head_z = _positive_or(getattr(point, "head_z", center_zeta), center_zeta)
+    origin_x = safe_float(getattr(center_point, "nose_target_x", None), float("nan"))
+    if not math.isfinite(origin_x):
+        origin_x = safe_float(center_point.screen_x, 0.0)
+    origin_y = safe_float(getattr(center_point, "nose_target_y", None), float("nan"))
+    if not math.isfinite(origin_y):
+        origin_y = safe_float(center_point.screen_y, 0.0)
     angles = screen_xy_to_head_angles(
         screen_x=eye_target_x,
         screen_y=eye_target_y,
@@ -324,10 +434,10 @@ def _target_eye_angles(
         screen_axis_y_y=float(screen_axis_y[1]),
         screen_axis_y_z=float(screen_axis_y[2]),
         screen_fit_rmse=0.0,
-        screen_scale_x=1.0,
-        screen_scale_y=1.0,
-        origin_x=safe_float(center_point.screen_x, 0.0),
-        origin_y=safe_float(center_point.screen_y, 0.0),
+        screen_scale_x=screen_scale_x,
+        screen_scale_y=screen_scale_y,
+        origin_x=origin_x,
+        origin_y=origin_y,
     )
     if angles is None:
         return None
@@ -345,7 +455,11 @@ def _signum(value: float, eps: float = 1e-6) -> int:
     return 0
 
 
-def compute_calibration_matrix(points: List[CalibrationPoint]) -> CalibrationMatrix:
+def compute_calibration_matrix(
+    points: List[CalibrationPoint],
+    px_per_mm_x: Optional[float] = None,
+    px_per_mm_y: Optional[float] = None,
+) -> CalibrationMatrix:
     if len(points) < 9:
         raise ValueError(f"Calibration requires 9 points, got {len(points)}")
     required_names = {"C", "T", "TL", "L", "BL", "B", "BR", "R", "TR"}
@@ -364,9 +478,18 @@ def compute_calibration_matrix(points: List[CalibrationPoint]) -> CalibrationMat
     center_head_x = safe_float(getattr(center_point, "head_x", 0.0), 0.0)
     center_head_y = safe_float(getattr(center_point, "head_y", 0.0), 0.0)
     center_head_z = _positive_or(getattr(center_point, "head_z", center_zeta), center_zeta)
-    screen_center_cam, screen_axis_x, screen_axis_y = _build_screen_geometry(
+    (
+        screen_center_cam,
+        screen_axis_x,
+        screen_axis_y,
+        screen_scale_x,
+        screen_scale_y,
+        screen_fit_rmse,
+    ) = _fit_screen_geometry(
+        points=points,
         center_point=center_point,
-        center_zeta=center_zeta,
+        px_per_mm_x=px_per_mm_x,
+        px_per_mm_y=px_per_mm_y,
     )
 
     yaw_positive_samples: List[float] = []
@@ -419,6 +542,8 @@ def compute_calibration_matrix(points: List[CalibrationPoint]) -> CalibrationMat
             screen_center_cam=screen_center_cam,
             screen_axis_x=screen_axis_x,
             screen_axis_y=screen_axis_y,
+            screen_scale_x=screen_scale_x,
+            screen_scale_y=screen_scale_y,
         )
         if target_eye is not None:
             target_eye_yaw, target_eye_pitch = target_eye
@@ -501,6 +626,8 @@ def compute_calibration_matrix(points: List[CalibrationPoint]) -> CalibrationMat
             screen_center_cam=screen_center_cam,
             screen_axis_x=screen_axis_x,
             screen_axis_y=screen_axis_y,
+            screen_scale_x=screen_scale_x,
+            screen_scale_y=screen_scale_y,
         )
         if target_eye is None:
             continue
@@ -525,14 +652,6 @@ def compute_calibration_matrix(points: List[CalibrationPoint]) -> CalibrationMat
         pitch_cross_targets.append(target_eye_pitch - pitch_coeff_point * eye_delta_pitch)
     yaw_from_pitch_coupling = _fit_linear_scalar(yaw_cross_inputs, yaw_cross_targets)
     pitch_from_yaw_coupling = _fit_linear_scalar(pitch_cross_inputs, pitch_cross_targets)
-    screen_scale_x, screen_scale_y = _resolve_screen_scale(
-        points=points,
-        center_point=center_point,
-        center_zeta=center_zeta,
-        screen_center_cam=screen_center_cam,
-        screen_axis_x=screen_axis_x,
-        screen_axis_y=screen_axis_y,
-    )
     total_sample_count = sum(int(p.sample_count) for p in points)
 
     return CalibrationMatrix(
@@ -565,7 +684,7 @@ def compute_calibration_matrix(points: List[CalibrationPoint]) -> CalibrationMat
         screen_axis_y_z=float(screen_axis_y[2]),
         screen_scale_x=screen_scale_x,
         screen_scale_y=screen_scale_y,
-        screen_fit_rmse=0.0,
+        screen_fit_rmse=screen_fit_rmse,
         sample_count=total_sample_count,
         timestamp_ms=int(time.time() * 1000),
     )
@@ -716,9 +835,9 @@ def load_calibration(
 
     calib_data = data.get("calibration", {})
     model_version = int(safe_float(calib_data.get("modelVersion", 1), 1))
-    if model_version not in (7, 8, CALIBRATION_MODEL_VERSION):
+    if model_version != CALIBRATION_MODEL_VERSION:
         logger.info(
-            f"Calibration file {file_path.name} has model version {model_version}, expected 7, 8 or {CALIBRATION_MODEL_VERSION}. Discarding."
+            f"Calibration file {file_path.name} has model version {model_version}, expected {CALIBRATION_MODEL_VERSION}. Discarding."
         )
         return empty, []
 

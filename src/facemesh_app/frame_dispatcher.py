@@ -5,6 +5,7 @@ Orchestrates the synchronous frame processing pipeline.
 
 import json
 import logging
+import math
 import time
 import urllib.request
 from pathlib import Path
@@ -21,6 +22,7 @@ from .calibration import (
     CalibratedFaceAndGazeEvent,
     CalibrationMatrix,
     CalibrationPoint,
+    apply_calibration_model,
     compute_calibration_matrix,
     save_calibration,
 )
@@ -738,7 +740,30 @@ class FrameDispatcher:
             calib_matrix = None
             if len(calib_points) == 9:
                 print("Computing calibration matrix...", flush=True)
-                calib_matrix = compute_calibration_matrix(calib_points)
+                display = getattr(self, "display", None) or {}
+                width_px = float(display.get("width", 0) or 0)
+                height_px = float(display.get("height", 0) or 0)
+                width_mm = float(display.get("width_mm", 0) or 0)
+                height_mm = float(display.get("height_mm", 0) or 0)
+                px_per_mm_x = width_px / width_mm if width_px > 0 and width_mm > 0 else None
+                px_per_mm_y = height_px / height_mm if height_px > 0 and height_mm > 0 else None
+                if px_per_mm_x and px_per_mm_y:
+                    print(
+                        f"Display physical size: {width_px:.0f}x{height_px:.0f}px / "
+                        f"{width_mm:.0f}x{height_mm:.0f}mm => "
+                        f"scales=({px_per_mm_x:.3f}, {px_per_mm_y:.3f}) px/mm",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        "Display physical size unavailable; falling back to unconstrained fit",
+                        flush=True,
+                    )
+                calib_matrix = compute_calibration_matrix(
+                    calib_points,
+                    px_per_mm_x=px_per_mm_x,
+                    px_per_mm_y=px_per_mm_y,
+                )
 
                 profile_name = (
                     getattr(self.args, "calibration_profile", "") or "default"
@@ -746,6 +771,99 @@ class FrameDispatcher:
                 calib_path = save_calibration(calib_matrix, calib_points, profile_name)
 
                 print(f"Calibration saved to: {calib_path}", flush=True)
+
+                origin_x = safe_float(
+                    getattr(
+                        next((p for p in calib_points if p.name == "C"), calib_points[0]),
+                        "screen_x",
+                        0.0,
+                    ),
+                    0.0,
+                )
+                origin_y = safe_float(
+                    getattr(
+                        next((p for p in calib_points if p.name == "C"), calib_points[0]),
+                        "screen_y",
+                        0.0,
+                    ),
+                    0.0,
+                )
+                print("Calibration round-trip (eye target vs apply):", flush=True)
+                pixel_errors: List[float] = []
+                for point in calib_points:
+                    result = apply_calibration_model(
+                        raw_eye_yaw=point.raw_eye_yaw,
+                        raw_eye_pitch=point.raw_eye_pitch,
+                        head_yaw=point.head_yaw,
+                        head_pitch=point.head_pitch,
+                        head_x=point.head_x,
+                        head_y=point.head_y,
+                        head_z=point.head_z,
+                        center_eye_yaw=calib_matrix.center_yaw,
+                        center_eye_pitch=calib_matrix.center_pitch,
+                        face_center_yaw=calib_matrix.face_center_yaw,
+                        face_center_pitch=calib_matrix.face_center_pitch,
+                        yaw_coefficient_positive=calib_matrix.yaw_coefficient_positive,
+                        yaw_coefficient_negative=calib_matrix.yaw_coefficient_negative,
+                        pitch_coefficient_positive=calib_matrix.pitch_coefficient_positive,
+                        pitch_coefficient_negative=calib_matrix.pitch_coefficient_negative,
+                        yaw_from_pitch_coupling=calib_matrix.yaw_from_pitch_coupling,
+                        pitch_from_yaw_coupling=calib_matrix.pitch_from_yaw_coupling,
+                        eye_yaw_min=calib_matrix.eye_yaw_min,
+                        eye_yaw_max=calib_matrix.eye_yaw_max,
+                        eye_pitch_min=calib_matrix.eye_pitch_min,
+                        eye_pitch_max=calib_matrix.eye_pitch_max,
+                        center_zeta=calib_matrix.center_zeta,
+                        face_center_x=calib_matrix.face_center_x,
+                        face_center_y=calib_matrix.face_center_y,
+                        face_center_z=calib_matrix.face_center_z,
+                        screen_center_cam_x=calib_matrix.screen_center_cam_x,
+                        screen_center_cam_y=calib_matrix.screen_center_cam_y,
+                        screen_center_cam_z=calib_matrix.screen_center_cam_z,
+                        screen_axis_x_x=calib_matrix.screen_axis_x_x,
+                        screen_axis_x_y=calib_matrix.screen_axis_x_y,
+                        screen_axis_x_z=calib_matrix.screen_axis_x_z,
+                        screen_axis_y_x=calib_matrix.screen_axis_y_x,
+                        screen_axis_y_y=calib_matrix.screen_axis_y_y,
+                        screen_axis_y_z=calib_matrix.screen_axis_y_z,
+                        screen_scale_x=calib_matrix.screen_scale_x,
+                        screen_scale_y=calib_matrix.screen_scale_y,
+                        screen_fit_rmse=calib_matrix.screen_fit_rmse,
+                        origin_x=origin_x,
+                        origin_y=origin_y,
+                    )
+                    got_x = result.get("corrected_screen_x")
+                    got_y = result.get("corrected_screen_y")
+                    target_x = (
+                        point.eye_target_x
+                        if point.eye_target_x is not None
+                        else point.screen_x
+                    )
+                    target_y = (
+                        point.eye_target_y
+                        if point.eye_target_y is not None
+                        else point.screen_y
+                    )
+                    if got_x is None or got_y is None:
+                        print(f"  {point.name:>3s}: projection failed", flush=True)
+                        continue
+                    err_x = float(got_x) - float(target_x)
+                    err_y = float(got_y) - float(target_y)
+                    pixel_errors.append(math.hypot(err_x, err_y))
+                    print(
+                        f"  {point.name:>3s}: target=({float(target_x):7.1f},{float(target_y):7.1f}) "
+                        f"apply=({float(got_x):7.1f},{float(got_y):7.1f}) "
+                        f"err=({err_x:+7.1f},{err_y:+7.1f})px",
+                        flush=True,
+                    )
+                if pixel_errors:
+                    max_err = max(pixel_errors)
+                    mean_err = sum(pixel_errors) / len(pixel_errors)
+                    print(
+                        f"  round-trip pixel error: mean={mean_err:.2f}px max={max_err:.2f}px",
+                        flush=True,
+                    )
+
                 print(
                     "Calibration matrix: "
                     f"eye_zero=({calib_matrix.center_yaw:.4f}, {calib_matrix.center_pitch:.4f}) "

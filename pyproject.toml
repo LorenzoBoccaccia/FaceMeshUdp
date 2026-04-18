@@ -7,6 +7,9 @@ name = "facemesh"
 version = "0.1.0"
 description = "Pure Python FaceMesh overlay + UDP app"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "Lorenzo Boccaccia"}]
 requires-python = ">=3.10"
 dependencies = [
   "mediapipe>=0.10.14",
@@ -34,7 +37,8 @@ where = ["src"]
 
 [tool.taskipy.tasks]
 run = "python -m facemesh_app.main"
-build-exe = ".\\.venv\\Scripts\\python -m PyInstaller --noconfirm --onefile --name facemesh --paths src --collect-all mediapipe --collect-all pygame --collect-all cv2 src/facemesh_app/main.py"
+build-exe = ".\\.venv\\Scripts\\python -m PyInstaller --noconfirm facemesh.spec"
+dist-zip = "python scripts/make_dist_zip.py"
 
 [tool.pytest.ini_options]
 testpaths = ["test"]

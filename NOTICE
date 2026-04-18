@@ -1,0 +1,68 @@
+FaceMesh
+Copyright (c) 2026 Lorenzo Boccaccia
+
+This product is licensed under the MIT License (see LICENSE).
+
+This product bundles third-party components listed below. Each component
+remains under its own license. Full license texts are provided in
+THIRD_PARTY_LICENSES.txt.
+
+------------------------------------------------------------------------
+
+MediaPipe
+    Copyright 2019-2024 The MediaPipe Authors.
+    Licensed under the Apache License, Version 2.0.
+    https://github.com/google-ai-edge/mediapipe
+
+face_landmarker.task (MediaPipe Face Landmarker model)
+    Copyright 2023 The MediaPipe Authors.
+    Licensed under the Apache License, Version 2.0.
+    https://developers.google.com/mediapipe/solutions/vision/face_landmarker
+
+OpenCV (opencv-python)
+    Copyright (C) 2000-2024, Intel Corporation, Willow Garage, Itseez,
+    OpenCV Foundation, and contributors.
+    Licensed under the Apache License, Version 2.0.
+    https://github.com/opencv/opencv-python
+
+NumPy
+    Copyright (c) 2005-2024, NumPy Developers.
+    Licensed under the BSD 3-Clause License.
+    https://github.com/numpy/numpy
+
+SciPy
+    Copyright (c) 2001-2024, SciPy Developers.
+    Licensed under the BSD 3-Clause License.
+    https://github.com/scipy/scipy
+
+pygame
+    Copyright (C) 2000-2024 Pete Shinners, Rene Dudfield, and contributors.
+    Licensed under the GNU Lesser General Public License, version 2.1
+    or (at your option) any later version.
+    https://github.com/pygame/pygame
+
+    This distribution includes compiled pygame extension modules in
+    `_internal/pygame/` as replaceable shared library files. You may
+    replace them with a modified version of the pygame library compiled
+    for the same Python version. The corresponding source code for
+    pygame (and for the SDL, SDL_image, SDL_mixer, SDL_ttf, freetype,
+    and portmidi libraries it bundles) is available from the URLs above
+    and below, or from the copyright holder on written request to the
+    address given at the top of this file, for a period of at least
+    three years from the date of this distribution.
+
+pygame bundles:
+
+  SDL 2   - zlib License - https://www.libsdl.org/
+  SDL2_image - zlib License - https://github.com/libsdl-org/SDL_image
+  SDL2_mixer - zlib License - https://github.com/libsdl-org/SDL_mixer
+  SDL2_ttf   - zlib License - https://github.com/libsdl-org/SDL_ttf
+  FreeType   - FreeType License (BSD-style) - https://freetype.org/
+  PortMidi   - MIT License - https://github.com/PortMidi/portmidi
+
+------------------------------------------------------------------------
+
+The authoritative list of bundled Python packages and their versions can
+be obtained from the pip manifest of the build environment (see
+`pyproject.toml` for top-level requirements and pinned transitive
+dependencies for any given release).

@@ -26,7 +26,7 @@ from .calibration import (
     compute_calibration_matrix,
     save_calibration,
 )
-from .capture import save_test_capture, build_camera_capture_marked_image
+from .capture import save_capture, build_camera_capture_marked_image
 from .capture_window import CaptureWindowManager
 from .overlay_calibration import CalibrationOverlayManager
 from .overlay_common import get_display_geo
@@ -615,7 +615,7 @@ class FrameDispatcher:
                         if on_capture_click is not None:
                             on_capture_click(clicked)
                         else:
-                            save_test_capture(
+                            save_capture(
                                 self.display,
                                 w,
                                 h,

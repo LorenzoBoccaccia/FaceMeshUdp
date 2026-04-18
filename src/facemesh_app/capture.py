@@ -22,8 +22,12 @@ from .facemesh_dao import (
     RIGHT_IRIS_CENTER_IDX,
     LEFT_IRIS_RING_IDXS,
     RIGHT_IRIS_RING_IDXS,
-    LEFT_EYE_KEY_IDXS,
-    RIGHT_EYE_KEY_IDXS,
+    LEFT_EYE_INNER_IDX,
+    LEFT_EYE_OUTER_IDX,
+    RIGHT_EYE_INNER_IDX,
+    RIGHT_EYE_OUTER_IDX,
+    NOSE_BRIDGE_IDX,
+    NOSE_BASE_IDX,
 )
 
 
@@ -487,17 +491,6 @@ def build_camera_capture_marked_image(
     right_iris_ring = _lm_points_px(
         landmarks, RIGHT_IRIS_RING_IDXS, fw, fh, mirror_x=mirror_view
     )
-    left_eye_keys = _lm_points_px(
-        landmarks, LEFT_EYE_KEY_IDXS, fw, fh, mirror_x=mirror_view
-    )
-    right_eye_keys = _lm_points_px(
-        landmarks, RIGHT_EYE_KEY_IDXS, fw, fh, mirror_x=mirror_view
-    )
-
-    _draw_ring(img, left_iris_ring, ORANGE)
-    _draw_ring(img, right_iris_ring, CYAN)
-    _draw_points(img, left_eye_keys, ORANGE, radius=2)
-    _draw_points(img, right_eye_keys, CYAN, radius=2)
 
     if 0 <= LEFT_IRIS_CENTER_IDX < len(landmarks):
         left_center = _lm_to_px(
@@ -518,115 +511,116 @@ def build_camera_capture_marked_image(
         cv2.circle(img, right_center, 5, WHITE, -1, cv2.LINE_AA)
         cv2.circle(img, right_center, 3, MAGENTA, -1, cv2.LINE_AA)
 
-    l_gaze_yaw = None
-    l_gaze_pitch = None
-    r_gaze_yaw = None
-    r_gaze_pitch = None
-    if isinstance(snap_evt, FaceMeshEvent):
-        eyes = snap_evt.eyes_dict()
-        l_gaze_yaw = eyes.get("leftEyeGazeYaw")
-        l_gaze_pitch = eyes.get("leftEyeGazePitch")
-        r_gaze_yaw = eyes.get("rightEyeGazeYaw")
-        r_gaze_pitch = eyes.get("rightEyeGazePitch")
-    elif isinstance(snap_evt, dict):
-        eyes = snap_evt.get("eyes") or {}
-        if isinstance(eyes, dict):
-            l_gaze_yaw = eyes.get("leftEyeGazeYaw")
-            l_gaze_pitch = eyes.get("leftEyeGazePitch")
-            r_gaze_yaw = eyes.get("rightEyeGazeYaw")
-            r_gaze_pitch = eyes.get("rightEyeGazePitch")
+    # Canthus points + eye axis used for lateral iris distance.
+    def _draw_canthus_axis(inner_idx: int, outer_idx: int, iris_center, color):
+        if inner_idx >= len(landmarks) or outer_idx >= len(landmarks):
+            return
+        inner_px = _lm_to_px(landmarks[inner_idx], fw, fh, mirror_x=mirror_view)
+        outer_px = _lm_to_px(landmarks[outer_idx], fw, fh, mirror_x=mirror_view)
+        cv2.line(img, inner_px, outer_px, WHITE, 3, cv2.LINE_AA)
+        cv2.line(img, inner_px, outer_px, color, 1, cv2.LINE_AA)
+        cv2.circle(img, inner_px, 5, WHITE, -1, cv2.LINE_AA)
+        cv2.circle(img, inner_px, 3, color, -1, cv2.LINE_AA)
+        cv2.circle(img, outer_px, 4, WHITE, -1, cv2.LINE_AA)
+        cv2.circle(img, outer_px, 2, color, -1, cv2.LINE_AA)
 
-    # Get nose position for average gaze vector origin.
-    nose = (
-        _lm_to_px(landmarks[1], fw, fh, mirror_x=mirror_view)
-        if len(landmarks) > 1
-        else (fw // 2, fh // 2)
+        if iris_center is None:
+            return
+        ax_dx = float(outer_px[0] - inner_px[0])
+        ax_dy = float(outer_px[1] - inner_px[1])
+        axis_len = math.hypot(ax_dx, ax_dy)
+        if axis_len <= 1e-6:
+            return
+        ux = ax_dx / axis_len
+        uy = ax_dy / axis_len
+        ix = float(iris_center[0])
+        iy = float(iris_center[1])
+        t = (ix - inner_px[0]) * ux + (iy - inner_px[1]) * uy
+        foot = (
+            int(round(inner_px[0] + t * ux)),
+            int(round(inner_px[1] + t * uy)),
+        )
+        # Iris -> inner canthus, parallel to inner->outer canthus axis
+        # (drop iris perpendicularly onto the eye axis, then walk along
+        # the axis back to the inner canthus -- the lateral distance segment).
+        iris_px = (int(round(ix)), int(round(iy)))
+        cv2.line(img, iris_px, foot, WHITE, 2, cv2.LINE_AA)
+        cv2.line(img, iris_px, foot, color, 1, cv2.LINE_AA)
+        cv2.line(img, foot, inner_px, WHITE, 3, cv2.LINE_AA)
+        cv2.line(img, foot, inner_px, color, 1, cv2.LINE_AA)
+        cv2.circle(img, foot, 3, WHITE, -1, cv2.LINE_AA)
+
+    _draw_canthus_axis(LEFT_EYE_INNER_IDX, LEFT_EYE_OUTER_IDX, left_center, ORANGE)
+    _draw_canthus_axis(RIGHT_EYE_INNER_IDX, RIGHT_EYE_OUTER_IDX, right_center, CYAN)
+
+    # Nose T: bridge->base axis (vertical reference for eye pitch) and
+    # the perpendicular at the bridge (horizontal eye-span direction).
+    nose_bridge_px = (
+        _lm_to_px(landmarks[NOSE_BRIDGE_IDX], fw, fh, mirror_x=mirror_view)
+        if NOSE_BRIDGE_IDX < len(landmarks)
+        else None
     )
+    nose_base_px = (
+        _lm_to_px(landmarks[NOSE_BASE_IDX], fw, fh, mirror_x=mirror_view)
+        if NOSE_BASE_IDX < len(landmarks)
+        else None
+    )
+    if nose_bridge_px is not None and nose_base_px is not None:
+        bx, by = float(nose_bridge_px[0]), float(nose_bridge_px[1])
+        nbx, nby = float(nose_base_px[0]), float(nose_base_px[1])
+        ax = nbx - bx
+        ay = nby - by
+        axis_len = math.hypot(ax, ay)
+        if axis_len > 1e-6:
+            n_hat_x = ax / axis_len
+            n_hat_y = ay / axis_len
+            p_hat_x = -n_hat_y
+            p_hat_y = n_hat_x
+            if left_center is not None and right_center is not None:
+                eye_span = math.hypot(
+                    float(right_center[0] - left_center[0]),
+                    float(right_center[1] - left_center[1]),
+                )
+            else:
+                eye_span = axis_len
+            half_len = max(90.0, eye_span * 2.5)
+            p1 = (
+                int(round(bx - p_hat_x * half_len)),
+                int(round(by - p_hat_y * half_len)),
+            )
+            p2 = (
+                int(round(bx + p_hat_x * half_len)),
+                int(round(by + p_hat_y * half_len)),
+            )
+            cv2.line(img, nose_bridge_px, nose_base_px, WHITE, 4, cv2.LINE_AA)
+            cv2.line(img, nose_bridge_px, nose_base_px, RED, 2, cv2.LINE_AA)
+            cv2.line(img, p1, p2, WHITE, 4, cv2.LINE_AA)
+            cv2.line(img, p1, p2, GREEN, 2, cv2.LINE_AA)
 
-    # Draw gaze vectors from yaw/pitch for each eye from pupil (iris center).
-    # Coordinate System Convention: right-positive, up-positive
-    def _vector_from_yaw_pitch(yaw_deg, pitch_deg):
-        """Convert yaw/pitch to 3D direction vector.
+            # Iris -> bridge-perpendicular line, perpendicular drop
+            # (vertical-distance segment from iris to the nose T crossbar).
+            def _drop_to_bridge_perp(iris_center, color):
+                if iris_center is None:
+                    return
+                ix = float(iris_center[0])
+                iy = float(iris_center[1])
+                proj_t = (ix - bx) * p_hat_x + (iy - by) * p_hat_y
+                foot = (
+                    int(round(bx + proj_t * p_hat_x)),
+                    int(round(by + proj_t * p_hat_y)),
+                )
+                iris_px = (int(round(ix)), int(round(iy)))
+                cv2.line(img, iris_px, foot, WHITE, 2, cv2.LINE_AA)
+                cv2.line(img, iris_px, foot, color, 1, cv2.LINE_AA)
+                cv2.circle(img, foot, 3, WHITE, -1, cv2.LINE_AA)
 
-        Coordinate System Convention:
-        - Yaw: Positive values indicate looking RIGHT, negative values indicate looking LEFT
-        - Pitch: Positive values indicate looking UP, negative values indicate looking DOWN
+            _drop_to_bridge_perp(left_center, ORANGE)
+            _drop_to_bridge_perp(right_center, CYAN)
+        cv2.circle(img, nose_bridge_px, 6, WHITE, -1, cv2.LINE_AA)
+        cv2.circle(img, nose_bridge_px, 4, RED, -1, cv2.LINE_AA)
+        cv2.circle(img, nose_base_px, 6, WHITE, -1, cv2.LINE_AA)
+        cv2.circle(img, nose_base_px, 4, YELLOW, -1, cv2.LINE_AA)
 
-        Returns 3D direction vector [vx, vy, vz] where:
-        - vx: Horizontal component (positive = right)
-        - vy: Vertical component in image coordinates (negative = up in image space)
-        - vz: Depth component (positive = forward into the scene)
-        """
-        yaw = safe_float(yaw_deg, float("nan"))
-        pitch = safe_float(pitch_deg, float("nan"))
-        if not (math.isfinite(yaw) and math.isfinite(pitch)):
-            return None
-        yaw_r = math.radians(yaw)
-        pitch_r = math.radians(pitch)
-        # Right-positive yaw: vx = sin(yaw) * cos(pitch)
-        # Up-positive pitch: vy = -sin(pitch) (negative y in image coords when looking up)
-        vx = math.sin(yaw_r) * math.cos(pitch_r)
-        vy = -math.sin(pitch_r)
-        vz = -math.cos(yaw_r) * math.cos(pitch_r)
-        return [vx, vy, vz]
-
-    l_gaze_vec = _vector_from_yaw_pitch(l_gaze_yaw, l_gaze_pitch)
-    r_gaze_vec = _vector_from_yaw_pitch(r_gaze_yaw, r_gaze_pitch)
-
-    if left_center is not None and l_gaze_vec is not None:
-        _draw_normal_arrow(
-            img,
-            left_center,
-            l_gaze_vec,
-            YELLOW,
-            max(24, int(min(fw, fh) * 0.08)),
-        )
-    if right_center is not None and r_gaze_vec is not None:
-        _draw_normal_arrow(
-            img,
-            right_center,
-            r_gaze_vec,
-            YELLOW,
-            max(24, int(min(fw, fh) * 0.08)),
-        )
-
-    if l_gaze_yaw is not None and r_gaze_yaw is not None:
-        combined_gaze_yaw = (safe_float(l_gaze_yaw, 0.0) + safe_float(r_gaze_yaw, 0.0)) * 0.5
-    else:
-        combined_gaze_yaw = None
-    if l_gaze_pitch is not None and r_gaze_pitch is not None:
-        combined_gaze_pitch = (
-            safe_float(l_gaze_pitch, 0.0) + safe_float(r_gaze_pitch, 0.0)
-        ) * 0.5
-    else:
-        combined_gaze_pitch = None
-    combined_gaze_vec = _vector_from_yaw_pitch(combined_gaze_yaw, combined_gaze_pitch)
-    if combined_gaze_vec is not None:
-        _draw_normal_arrow(
-            img,
-            nose,
-            combined_gaze_vec,
-            YELLOW,
-            max(30, int(min(fw, fh) * 0.10)),
-        )
-
-    # Draw face direction vector from nose center using yaw/pitch/roll.
-    if isinstance(snap_evt, FaceMeshEvent):
-        _draw_face_direction_from_ypr(
-            img,
-            nose,
-            snap_evt.head_yaw,
-            snap_evt.head_pitch,
-            snap_evt.roll,
-        )
-    elif isinstance(snap_evt, dict):
-        _draw_face_direction_from_ypr(
-            img,
-            nose,
-            snap_evt.get("headYaw", snap_evt.get("yaw")),
-            snap_evt.get("headPitch", snap_evt.get("pitch")),
-            snap_evt.get("roll"),
-        )
     # Click marker mapped from overlay-space to frame-space.
     cx = int(
         clamp(round((float(click_pos[0]) / max(1.0, float(overlay_w))) * fw), 0, fw - 1)
@@ -643,7 +637,7 @@ def build_camera_capture_marked_image(
     return img, None
 
 
-def save_test_capture(
+def save_capture(
     display: Dict,
     w: float,
     h: float,
@@ -799,17 +793,17 @@ def save_test_capture(
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     if shot_ok and raw_ok:
         print(
-            f"[test] Saved {png_path.name}, {raw_png_path.name}, and {json_path.name}",
+            f"Saved {png_path.name}, {raw_png_path.name}, and {json_path.name}",
             flush=True,
         )
     elif shot_ok and not raw_ok:
         print(
-            f"[test] Saved {png_path.name} and {json_path.name} (raw frame failed: {raw_err})",
+            f"Saved {png_path.name} and {json_path.name} (raw frame failed: {raw_err})",
             flush=True,
         )
     else:
         print(
-            f"[test] Marked screenshot failed, saved JSON: {json_path.name} "
+            f"Marked screenshot failed, saved JSON: {json_path.name} "
             f"(marked={shot_err}, raw={'ok' if raw_ok else raw_err})",
             flush=True,
         )

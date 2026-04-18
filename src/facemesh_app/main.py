@@ -13,18 +13,18 @@ import cv2
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
-from .calibration import load_calibration
-from .camera_reader import CameraReader
-from .frame_dispatcher import FrameDispatcher, ensure_model, MODEL_PATH
-from .overlay_common import get_display_geo
-from .pipeline_steps import (
+from facemesh_app.calibration import load_calibration
+from facemesh_app.camera_reader import CameraReader
+from facemesh_app.frame_dispatcher import FrameDispatcher, ensure_model, MODEL_PATH
+from facemesh_app.overlay_common import get_display_geo
+from facemesh_app.pipeline_steps import (
     FaceMeshStep,
     CalibrationAdapterStep,
     CaptureStep,
     OverlayStep,
     UDPForwardStep,
 )
-from .state_machine import StateMachine
+from facemesh_app.state_machine import StateMachine
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +205,16 @@ def main():
     if args.capture_live:
         args.capture = True
 
+    no_explicit_mode = not (
+        args.overlay
+        or args.capture
+        or args.capture_live
+        or args.udp
+        or args.calibrate
+        or args.calibration
+        or args.force_recalibrate
+    )
+
     calibration = None
     if not args.force_recalibrate and not args.calibrate and not args.calibration:
         try:
@@ -233,6 +243,21 @@ def main():
             )
         else:
             logger.info("No existing calibration found. Running in uncalibrated mode.")
+
+    auto_transition_to_udp = False
+    if no_explicit_mode:
+        if calibration is not None and calibration.sample_count > 0:
+            args.udp = True
+            logger.info(
+                "No mode specified; existing calibration found. Starting UDP forwarder."
+            )
+        else:
+            args.calibrate = True
+            auto_transition_to_udp = True
+            logger.info(
+                "No mode specified and no calibration on disk. "
+                "Running calibration, then UDP forwarder."
+            )
 
     state_machine = StateMachine()
 
@@ -370,7 +395,19 @@ def main():
         if args.calibrate or args.calibration:
             frame_dispatcher.start_calibration()
             logger.info("Running calibration workflow...")
-            frame_dispatcher.run_calibration_workflow(camera_reader)
+            calib_matrix, _ = frame_dispatcher.run_calibration_workflow(camera_reader)
+            if auto_transition_to_udp:
+                if calib_matrix is None:
+                    logger.info(
+                        "Calibration did not complete; UDP forwarder will not start."
+                    )
+                else:
+                    logger.info(
+                        "Calibration complete. Starting UDP forwarder on "
+                        f"{args.udp_host}:{args.udp_port}."
+                    )
+                    frame_dispatcher.set_udp_forwarding_enabled(True)
+                    frame_dispatcher.run_capture_loop(camera_reader)
         else:
             frame_dispatcher.start_operational()
             active_modes = []

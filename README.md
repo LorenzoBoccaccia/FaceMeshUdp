@@ -1,62 +1,74 @@
-# FaceMesh (Python)
+# FaceMesh
 
-A simplified face mesh data capture application using MediaPipe FaceLandmarker.
+Python face-tracking app built on MediaPipe FaceLandmarker. Produces gaze/head-pose output with an optional overlay, capture tooling, a 9-point calibration workflow, and UDP forwarding.
 
-## Usage
-
-Run the application:
+## Install
 
 ```powershell
-python -m facemesh_app.main
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
 ```
 
-## Features
-
-- **Face Mesh Data Capture**: Captures raw face mesh data including landmarks, blendshapes, and transformation matrix
-- **Optional Overlay Display**: Shows live face mesh visualization on screen
-- **Capture Mode**: Save mesh data snapshots for analysis
-
-## Command Line Options
+## Run
 
 ```powershell
+python -m facemesh_app.main --overlay
+python -m facemesh_app.main --udp --udp-host 127.0.0.1 --udp-port 4242
+python -m facemesh_app.main --calibrate
 python -m facemesh_app.main --overlay --capture
-python -m facemesh_app.main --no-overlay
-python -m facemesh_app.main --duration 10.0
 ```
 
-### Available Options
+At least one mode flag (`--overlay`, `--capture`, `--udp`, `--calibrate`) must be set.
 
-- `--overlay` / `--no-overlay`: Enable/disable overlay window (default: enabled)
-- `--capture` / `--no-capture`: Enable capture mode (requires overlay)
-- `--duration SECONDS`: Run time in seconds (0 = continuous)
-- `--camera-index N`: Camera device index (default: 0)
-- `--camera-backend`: Camera backend (auto/msmf/dshow/any, default: auto)
-- `--camera-width WIDTH`: Camera resolution width (default: auto)
-- `--camera-height HEIGHT`: Camera resolution height (default: auto)
-- `--camera-fps FPS`: Camera FPS (default: auto)
-- `--camera-fourcc CODEC`: Camera codec (default: MJPG)
-- `--quiet`: Suppress console output
-- `--log-interval SECONDS`: Log interval in seconds (default: 2.0)
-- `--overlay-fps FPS`: Overlay refresh rate (default: 60)
+## Options
 
-## Capture Mode
+Modes:
 
-When `--capture` is enabled, left-clicking on the overlay window saves:
-- `captures/mesh_capture_*.png`: Camera frame with face mesh landmarks
-- `captures/mesh_capture_*.json`: Raw mesh data (landmarks, blendshapes, transform matrix)
+- `--overlay` — transparent overlay window with live landmarks
+- `--capture` — save frames/mesh data on click (implies overlay)
+- `--capture-live` / `--live` — show live camera feed in the capture window
+- `--udp` — forward calibrated gaze output over UDP
+- `--calibrate` / `--calibration` — run the 9-point calibration workflow
+- `--force-recalibrate` — ignore any stored profile and recalibrate
+- `--calibration-profile NAME` — named calibration profile (defaults to `default`)
+- `--calibration-samples N` — minimum samples per point (default: 5)
 
-## Output Data
+Camera (env vars in parentheses override defaults):
 
-The application captures raw face mesh data:
+- `--camera-index N` (`CAMERA_INDEX`, default 0)
+- `--camera-backend {auto,msmf,dshow,any}` (`CAMERA_BACKEND`, default `dshow`)
+- `--camera-width W` (`CAMERA_WIDTH`, default 1920)
+- `--camera-height H` (`CAMERA_HEIGHT`, default 1080)
+- `--camera-fps FPS` (`CAMERA_FPS`, default 60)
+- `--camera-fourcc CODEC` (`CAMERA_FOURCC`, default `MJPG`)
 
-- **Landmarks**: 478 face mesh landmarks as (x, y, z) coordinates
-- **Blendshapes**: 52 facial expression blendshape scores
-- **Transform Matrix**: 4x4 facial transformation matrix
+UDP:
 
-## Build Executable
+- `--udp-host HOST` (`UDP_HOST`, default `127.0.0.1`)
+- `--udp-port PORT` (`UDP_PORT`, default 4242)
 
-To build a standalone executable (inside project venv):
+Misc:
+
+- `--overlay-fps FPS` — overlay redraw rate (default 60)
+- `--log-interval SECONDS` — periodic stats interval (default 2.0)
+- `--quiet` — suppress console output
+
+## Capture output
+
+Left-click the overlay in capture mode to write:
+
+- `captures/mesh_capture_*.png` — frame with landmarks drawn
+- `captures/mesh_capture_*.json` — 478 landmarks, 52 blendshapes, 4x4 transform matrix
+
+## Build a standalone executable
 
 ```powershell
 task build-exe
 ```
+
+Outputs `dist/facemesh.exe` via PyInstaller.
+
+## Profiling
+
+Set `FACEMESH_PROFILE=1` to launch under yappi; stats are written on exit.

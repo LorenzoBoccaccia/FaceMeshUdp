@@ -347,11 +347,26 @@ class CalibrationOverlayManager:
             pygame.draw.circle(self._screen, WHITE, (eye_x, eye_y), DOT_RADIUS + 2, 2)
 
         instruction = current_point.get("instruction", "")
-        label = f"{self._current_calib_idx + 1}/{len(self._calibration_sequence)}"
-        text = f"{label}  {instruction}"
-        text_surface = self._font.render(text, True, WHITE)
-        text_rect = text_surface.get_rect(center=(self._width // 2, 40))
-        self._screen.blit(text_surface, text_rect)
+        label = f"Step {self._current_calib_idx + 1}/{len(self._calibration_sequence)}"
+        phase_hint = {
+            "wait_click": "Align, hold steady, then CLICK.",
+            "blink": "Hold still — capturing…",
+            "capture": "Keep holding — sampling…",
+        }.get(phase, "")
+
+        lines = [label]
+        lines.extend(line for line in instruction.split("\n") if line)
+        if phase_hint:
+            lines.append(phase_hint)
+
+        base_y = int(self._height * 3 / 4)
+        line_height = self._font.get_linesize()
+        for i, line in enumerate(lines):
+            text_surface = self._font.render(line, True, WHITE)
+            text_rect = text_surface.get_rect(
+                center=(self._width // 2, base_y + i * line_height)
+            )
+            self._screen.blit(text_surface, text_rect)
 
     def _make_calib_seq(self, width: float, height: float) -> List[Dict]:
         """Generate the calibration target list."""
@@ -369,7 +384,10 @@ class CalibrationOverlayManager:
         br = (w - inset, h - inset)
         bl = (inset, h - inset)
 
-        click_instruction = "Point nose to RED, eyes to GREEN, then click."
+        click_instruction = (
+            "Turn your HEAD so your nose points at the RED dot.\n"
+            "Keep your EYES fixed on the GREEN dot (do not move your head to follow it)."
+        )
 
         return [
             {
@@ -380,7 +398,10 @@ class CalibrationOverlayManager:
                 "nose_y": center_y,
                 "eye_x": center_x,
                 "eye_y": center_y,
-                "instruction": "Look forward at the centre and click.",
+                "instruction": (
+                    "Face the screen squarely and look at the CENTRE dot.\n"
+                    "Keep your head and eyes aligned straight ahead."
+                ),
             },
             {
                 "name": "T",

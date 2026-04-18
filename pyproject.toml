@@ -19,7 +19,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pyinstaller>=6.11.0",
-  "taskipy>=1.14.0"
+  "taskipy>=1.14.0",
+  "yappi>=1.6.0"
 ]
 
 [project.scripts]

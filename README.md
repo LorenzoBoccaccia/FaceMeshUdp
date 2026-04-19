@@ -1,6 +1,6 @@
 # FaceMesh
 
-Python face-tracking app built on MediaPipe FaceLandmarker. Produces gaze/head-pose output with an optional overlay, capture tooling, a 9-point calibration workflow, and UDP forwarding.
+Python face-tracking app built on MediaPipe FaceLandmarker. Produces gaze/head-pose output with an optional overlay, capture tooling, a 9-point calibration workflow, and UDP forwarding. See [eyes.ini](eyes.ini) for an example opentrack profile that consumes the UDP stream.
 
 ## Install
 
@@ -10,18 +10,16 @@ python -m venv .venv
 pip install -e ".[dev]"
 ```
 
-## Run
+## Calibrate and run
 
 ```powershell
-python -m facemesh_app.main --overlay
-python -m facemesh_app.main --udp --udp-host 127.0.0.1 --udp-port 4242
 python -m facemesh_app.main --calibrate
-python -m facemesh_app.main --overlay --capture
+python -m facemesh_app.main --udp 
 ```
 
-At least one mode flag (`--overlay`, `--capture`, `--udp`, `--calibrate`) must be set.
-
 ## Options
+
+At least one mode flag (`--overlay`, `--capture`, `--udp`, `--calibrate`) must be set.
 
 Modes:
 

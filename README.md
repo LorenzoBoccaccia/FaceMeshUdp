@@ -1,6 +1,6 @@
 # FaceMesh
 
-Python face-tracking app built on MediaPipe FaceLandmarker. Produces gaze/head-pose output with an optional overlay, capture tooling, a 9-point calibration workflow, and UDP forwarding. See [eyes.ini](eyes.ini) for an example opentrack profile that consumes the UDP stream.
+Python face-tracking app built on MediaPipe FaceLandmarker. Produces gaze/head-pose output with an optional overlay, capture tooling, a 9-point calibration workflow, and UDP forwarding to OpenTrack. See [eyes.ini](eyes.ini) for an example opentrack profile that consumes the UDP stream.
 
 ## Install
 

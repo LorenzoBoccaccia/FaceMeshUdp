@@ -14,6 +14,17 @@ pip install -e ".[dev]"
 
 ## Calibrate and run
 
+`calibrate.bat` records the `default` profile into `calibration-default.json`, `start.bat`
+loads it and forwards over UDP. Both run from the repository root, use `.venv`, and pass any
+extra arguments through to the app (`start.bat --camera-index 1`).
+
+```powershell
+.\calibrate.bat
+.\start.bat
+```
+
+Equivalent direct invocation:
+
 ```powershell
 python -m facemesh_app.main --calibrate
 python -m facemesh_app.main --udp 

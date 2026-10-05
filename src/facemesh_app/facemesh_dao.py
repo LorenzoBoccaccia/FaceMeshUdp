@@ -7,7 +7,7 @@ Provides FaceMesh-derived pose, eye, and landmark values.
 import logging
 import math
 import time
-from typing import Any, Optional, Dict, List
+from typing import Any, Optional, Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -72,11 +72,14 @@ class FaceMeshEvent:
         self,
         result: Any = None,
         *,
+        image_size: Tuple[int, int],
         face_index: int = 0,
         ts: Optional[int] = None,
         event_type: str = "mesh",
     ):
         self.result = result
+        self.image_width = float(image_size[0])
+        self.image_height = float(image_size[1])
         self.face_index = int(face_index)
         self.type = str(event_type)
         self.ts = int(ts if ts is not None else time.time() * 1000)
@@ -95,11 +98,13 @@ class FaceMeshEvent:
         cls,
         result: Any,
         *,
+        image_size: Tuple[int, int],
         face_index: int = 0,
         ts: Optional[int] = None,
     ):
         return cls(
             result,
+            image_size=image_size,
             face_index=face_index,
             ts=ts,
             event_type="mesh",
@@ -208,6 +213,27 @@ class FaceMeshEvent:
         if flat is None or len(flat) < 16:
             return self._cache_set("transform_m44", None)
         return self._cache_set("transform_m44", [flat[0:4], flat[4:8], flat[8:12], flat[12:16]])
+
+    def _head_rotation(self) -> Optional[List[List[float]]]:
+        m44 = self._transform_m44()
+        if m44 is None:
+            return None
+        return [row[0:3] for row in m44[0:3]]
+
+    def _head_frame_xy(self, point: Optional[List[float]]) -> Optional[List[float]]:
+        """Landmark position on the face's own left-right and up-down axes, unaffected by head rotation."""
+        rotation = self._head_rotation()
+        if point is None or rotation is None:
+            return None
+        camera = (
+            point[0] * self.image_width,
+            -point[1] * self.image_height,
+            -point[2] * self.image_width,
+        )
+        return [
+            sum(rotation[i][0] * camera[i] for i in range(3)),
+            sum(rotation[i][1] * camera[i] for i in range(3)),
+        ]
 
     @property
     def has_face(self) -> bool:
@@ -534,9 +560,9 @@ class FaceMeshEvent:
         ):
             return None
 
-        iris_center_xy = self._xy(iris_center_point)
-        inner_canthus_xy = self._xy(inner_canthus_point)
-        outer_canthus_xy = self._xy(outer_canthus_point)
+        iris_center_xy = self._head_frame_xy(iris_center_point)
+        inner_canthus_xy = self._head_frame_xy(inner_canthus_point)
+        outer_canthus_xy = self._head_frame_xy(outer_canthus_point)
         if iris_center_xy is None or inner_canthus_xy is None or outer_canthus_xy is None:
             return None
 
@@ -555,35 +581,31 @@ class FaceMeshEvent:
             horizontal_position_from_inner / (eye_width * eye_width)
         ) - 0.5
 
-        nose_bridge_point = self.landmark_xyz(NOSE_BRIDGE_IDX)
-        nose_base_point = self.landmark_xyz(NOSE_BASE_IDX)
+        nose_bridge_xy = self._head_frame_xy(self.landmark_xyz(NOSE_BRIDGE_IDX))
+        nose_base_xy = self._head_frame_xy(self.landmark_xyz(NOSE_BASE_IDX))
 
         if (
-            nose_bridge_point is None
-            or nose_base_point is None
+            nose_bridge_xy is None
+            or nose_base_xy is None
         ):
             return None
 
-        nose_axis_dx = nose_base_point[0] - nose_bridge_point[0]
-        nose_axis_dy = nose_base_point[1] - nose_bridge_point[1]
+        nose_axis_dx = nose_base_xy[0] - nose_bridge_xy[0]
+        nose_axis_dy = nose_base_xy[1] - nose_bridge_xy[1]
         nose_axis_unit_2d = self._normalize_vec2(nose_axis_dx, nose_axis_dy)
         if nose_axis_unit_2d is None:
             return None
         nose_axis_ux, nose_axis_uy = nose_axis_unit_2d
 
-        iris_from_bridge_x = iris_center_xy[0] - nose_bridge_point[0]
-        iris_from_bridge_y = iris_center_xy[1] - nose_bridge_point[1]
+        iris_from_bridge_x = iris_center_xy[0] - nose_bridge_xy[0]
+        iris_from_bridge_y = iris_center_xy[1] - nose_bridge_xy[1]
         iris_to_perpendicular_signed = (
             iris_from_bridge_x * nose_axis_ux + iris_from_bridge_y * nose_axis_uy
         )
         normalized_vertical_offset = -(iris_to_perpendicular_signed / eye_width)
 
         yaw = 4 * normalized_horizontal_offset * HORIZONTAL_MAX_DEG
-        if normalized_vertical_offset > 0:
-            pitch = 2 * normalized_vertical_offset * VERTICAL_MAX_DEG
-        else:
-            pitch = 2 * normalized_vertical_offset * VERTICAL_MAX_DEG
-
+        pitch = 2 * normalized_vertical_offset * VERTICAL_MAX_DEG
         return yaw, pitch
 
     def _left_eye_raw_yaw_pitch(self) -> Optional[tuple[float, float]]:

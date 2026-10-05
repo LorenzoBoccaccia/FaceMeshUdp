@@ -99,9 +99,19 @@ def _create_mock_result(raw_result: Dict[str, Any]) -> Any:
     return MockResult()
 
 
-def extract_eye_gaze(result: Dict[str, Any]) -> Optional[Dict[str, float]]:
+def camera_image_size(data: Dict[str, Any]) -> Tuple[int, int]:
+    """Frame size the landmarks were normalized against."""
+    camera_info = data["cameraInfo"]
+    return int(camera_info["width"]), int(camera_info["height"])
+
+
+def extract_eye_gaze(
+    result: Dict[str, Any], image_size: Tuple[int, int]
+) -> Optional[Dict[str, float]]:
     """Extract eye gaze angles through FaceMeshEvent to match runtime math."""
-    event = FaceMeshEvent.from_landmarker_result(_create_mock_result(result))
+    event = FaceMeshEvent.from_landmarker_result(
+        _create_mock_result(result), image_size=image_size
+    )
 
     left_yaw = event.left_eye_gaze_yaw
     left_pitch = event.left_eye_gaze_pitch
@@ -135,6 +145,7 @@ def print_table(data: Dict[str, Any]) -> None:
     print("=" * 120)
 
     camera_info = data.get("cameraInfo", {})
+    image_size = camera_image_size(data)
     if camera_info:
         print(
             f"\nCamera: backend={camera_info.get('backend')} index={camera_info.get('index')} "
@@ -157,7 +168,7 @@ def print_table(data: Dict[str, Any]) -> None:
         head_angles = extract_head_angles(result)
         head_yaw_str = f"{head_angles[0]:+7.2f}" if head_angles else "n/a"
 
-        eye_gaze = extract_eye_gaze(result)
+        eye_gaze = extract_eye_gaze(result, image_size)
         if eye_gaze:
             eye_yaw_str = f"{eye_gaze['combined_yaw']:+8.2f}"
             left_yaw_str = (
@@ -186,6 +197,7 @@ def print_table(data: Dict[str, Any]) -> None:
 def analyze_yaw_consistency(data: Dict[str, Any]) -> bool:
     """Analyze monotonicity and yaw response variation across head positions."""
     points = data.get("points", [])
+    image_size = camera_image_size(data)
     if len(points) < 9:
         print("\n[ERROR] Not enough data for yaw consistency analysis (need 9 points)")
         return False
@@ -260,7 +272,7 @@ def analyze_yaw_consistency(data: Dict[str, Any]) -> bool:
             if eye_pos not in head_groups[head_pos]:
                 continue
             point = head_groups[head_pos][eye_pos]
-            eye_gaze = extract_eye_gaze(point.get("rawResult", {}))
+            eye_gaze = extract_eye_gaze(point.get("rawResult", {}), image_size)
             if not eye_gaze or eye_gaze["combined_yaw"] is None:
                 continue
 
@@ -405,7 +417,8 @@ def analyze_yaw_consistency(data: Dict[str, Any]) -> bool:
                 continue
             point = head_groups[head_pos][eye_pos]
             event = FaceMeshEvent.from_landmarker_result(
-                _create_mock_result(point.get("rawResult", {}))
+                _create_mock_result(point.get("rawResult", {})),
+                image_size=image_size,
             )
             left_yaw = event.left_eye_gaze_yaw
             right_yaw = event.right_eye_gaze_yaw

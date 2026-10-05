@@ -165,6 +165,14 @@ def parse_args():
         help="Client interface exposed to games: FreeTrack, TrackIR (NPClient) or both",
     )
     parser.add_argument(
+        "--freetrack-multiplier",
+        type=float,
+        default=1.0,
+        metavar="FACTOR",
+        help="Scale the gaze angles sent to games, so a small gaze shift turns the game "
+        "view further (default: 1)",
+    )
+    parser.add_argument(
         "--opentrack-dir",
         type=Path,
         default=os.getenv("OPENTRACK_DIR"),
@@ -179,6 +187,8 @@ def parse_args():
         parser.error("--smooth-reset must be at least 0 and shorter than --smooth")
     if args.smooth_threshold <= 0:
         parser.error("--smooth-threshold must be a positive number of degrees")
+    if args.freetrack_multiplier <= 0:
+        parser.error("--freetrack-multiplier must be a positive factor")
     if args.freetrack and sys.platform != "win32":
         parser.error("--freetrack requires Windows")
     return args
@@ -407,6 +417,7 @@ def main():
             freetrack_forward_step = FreeTrackForwardStep(
                 opentrack_dir=opentrack_dir,
                 interface=args.freetrack_interface,
+                multiplier=args.freetrack_multiplier,
                 enabled=True,
             )
         except FreeTrackSetupError as e:

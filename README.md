@@ -15,7 +15,7 @@ pip install -e ".[dev]"
 ## Calibrate and run
 
 `calibrate.bat` records the `default` profile into `calibration-default.json`, `start.bat`
-loads it and publishes to games over FreeTrack (TrackIR interface, 200 ms gaze smoothing, 50 ms tail kept on gaze jumps). Both run from the repository root, use `.venv`, and pass any
+loads it and publishes to games over FreeTrack (TrackIR interface, 500 ms gaze smoothing, 200 ms tail kept on gaze jumps beyond 5 degrees). Both run from the repository root, use `.venv`, and pass any
 extra arguments through to the app (`start.bat --camera-index 1`).
 
 ```powershell
@@ -66,6 +66,7 @@ OpenTrack:
 FreeTrack:
 
 - `--freetrack-interface both|freetrack|npclient` — interface exposed to games (default `both`)
+- `--freetrack-multiplier FACTOR` — scale the gaze angles sent to games, so a small gaze shift turns the game view further (default 1); the result is limited to ±180° yaw and ±90° pitch
 - `--opentrack-dir DIR` (`OPENTRACK_DIR`, default auto-detected) — opentrack install whose client DLLs and `TrackIR.exe` games use; opentrack must be installed but not running
 
 Misc:

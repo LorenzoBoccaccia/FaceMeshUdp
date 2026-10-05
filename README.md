@@ -66,7 +66,7 @@ OpenTrack:
 FreeTrack:
 
 - `--freetrack-interface both|freetrack|npclient` — interface exposed to games (default `both`)
-- `--opentrack-dir DIR` (`OPENTRACK_DIR`, default auto-detected) — opentrack install whose client DLLs games load
+- `--opentrack-dir DIR` (`OPENTRACK_DIR`, default auto-detected) — opentrack install whose client DLLs and `TrackIR.exe` games use; opentrack must be installed but not running
 
 Misc:
 

@@ -22,6 +22,8 @@ from .gaze_primitives import collect_gaze_primitives, draw_gaze_primitives_cv2
 
 logger = logging.getLogger(__name__)
 
+MM_PER_CM = 10.0
+
 
 class FaceMeshStep:
     """First pipeline step: Extract face mesh data from frames using MediaPipe FaceLandmarker."""
@@ -884,7 +886,7 @@ class OpenTrackForwardStep:
             gaze: Gaze direction to forward as yaw and pitch
 
         Returns:
-            Binary OpenTrack pose payload
+            Binary OpenTrack pose payload: position in centimetres, angles in degrees
         """
         face_event = event.face_mesh_event
 
@@ -909,7 +911,13 @@ class OpenTrackForwardStep:
             else 0.0
         )
         return struct.pack(
-            "<6d", head_x, head_y, head_z, gaze.yaw, gaze.pitch, roll
+            "<6d",
+            head_x / MM_PER_CM,
+            head_y / MM_PER_CM,
+            head_z / MM_PER_CM,
+            gaze.yaw,
+            gaze.pitch,
+            roll,
         )
 
     def receive_frame(

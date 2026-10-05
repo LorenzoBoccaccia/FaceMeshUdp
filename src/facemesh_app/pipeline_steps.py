@@ -57,7 +57,11 @@ class FaceMeshStep:
             self._last_timestamp_ms = ts
 
             result = self.face_landmarker.detect_for_video(mp_image, ts)
-            evt = FaceMeshEvent.from_landmarker_result(result, ts=ts)
+            evt = FaceMeshEvent.from_landmarker_result(
+                result,
+                image_size=(frame_rgb.shape[1], frame_rgb.shape[0]),
+                ts=ts,
+            )
             return evt
 
         except Exception as e:

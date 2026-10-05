@@ -99,8 +99,18 @@ def _create_mock_result(raw_result: Dict[str, Any]) -> Any:
     return MockResult()
 
 
-def extract_measurements(raw_result: Dict[str, Any]) -> Dict[str, Optional[float]]:
-    event = FaceMeshEvent.from_landmarker_result(_create_mock_result(raw_result))
+def camera_image_size(data: Dict[str, Any]) -> Tuple[int, int]:
+    """Frame size the landmarks were normalized against."""
+    camera_info = data["cameraInfo"]
+    return int(camera_info["width"]), int(camera_info["height"])
+
+
+def extract_measurements(
+    raw_result: Dict[str, Any], image_size: Tuple[int, int]
+) -> Dict[str, Optional[float]]:
+    event = FaceMeshEvent.from_landmarker_result(
+        _create_mock_result(raw_result), image_size=image_size
+    )
     return {
         "head_yaw": event.head_yaw,
         "head_pitch": event.head_pitch,
@@ -117,14 +127,16 @@ def extract_measurements(raw_result: Dict[str, Any]) -> Dict[str, Optional[float
     }
 
 
-def build_measurement_map(points: List[Dict[str, Any]]) -> Dict[str, Dict[str, Optional[float]]]:
+def build_measurement_map(
+    points: List[Dict[str, Any]], image_size: Tuple[int, int]
+) -> Dict[str, Dict[str, Optional[float]]]:
     measurement_map: Dict[str, Dict[str, Optional[float]]] = {}
     for point in points:
         name = str(point.get("name") or "")
         if not name:
             continue
         raw_result = point.get("rawResult") or {}
-        measurement_map[name] = extract_measurements(raw_result)
+        measurement_map[name] = extract_measurements(raw_result, image_size)
     return measurement_map
 
 
@@ -344,7 +356,7 @@ def main() -> None:
         print("Error: no harmonization points found")
         sys.exit(1)
 
-    measurement_map = build_measurement_map(points)
+    measurement_map = build_measurement_map(points, camera_image_size(payload))
     print_table(points, measurement_map)
 
     rows, passed = evaluate_test_case(test_case, measurement_map)

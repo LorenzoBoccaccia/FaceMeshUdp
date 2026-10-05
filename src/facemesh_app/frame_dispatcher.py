@@ -5,7 +5,6 @@ Orchestrates the synchronous frame processing pipeline.
 
 import json
 import logging
-import math
 import time
 import urllib.request
 from pathlib import Path
@@ -14,16 +13,14 @@ from typing import Optional, Dict, List, Tuple, Callable, Any
 import cv2
 import numpy as np
 
-from .facemesh_dao import (
-    FaceMeshEvent,
-    safe_float,
-)
+from .facemesh_dao import FaceMeshEvent
 from .calibration import (
+    CALIBRATION_MODEL_VERSION,
     CalibratedFaceAndGazeEvent,
-    CalibrationMatrix,
     CalibrationPoint,
-    apply_calibration_model,
-    compute_calibration_matrix,
+    CalibrationProfile,
+    GazeModel,
+    Screen,
     save_calibration,
 )
 from .capture import save_capture, build_camera_capture_marked_image
@@ -35,8 +32,6 @@ from .state_machine import StateMachine, DispatcherState
 from .pipeline_steps import (
     FaceMeshStep,
     CalibrationAdapterStep,
-    CaptureStep,
-    OverlayStep,
     GazeSmoothingStep,
     OpenTrackForwardStep,
 )
@@ -58,134 +53,25 @@ def ensure_model():
     logger.info("FaceMesh model downloaded successfully")
 
 
-def enrich_runtime_evt(
-    evt: Optional[FaceMeshEvent],
-    calibrated_evt: Optional[CalibratedFaceAndGazeEvent] = None,
-) -> Optional[Dict]:
-    """Build a runtime payload that mirrors downstream calibrated outputs."""
-    if not evt:
-        return None
-
-    raw_left_yaw = evt.left_eye_gaze_yaw
-    raw_left_pitch = evt.left_eye_gaze_pitch
-    raw_right_yaw = evt.right_eye_gaze_yaw
-    raw_right_pitch = evt.right_eye_gaze_pitch
-
-    raw_combined_yaw = None
-    if raw_left_yaw is not None and raw_right_yaw is not None:
-        raw_combined_yaw = (raw_left_yaw + raw_right_yaw) / 2.0
-
-    raw_combined_pitch = None
-    if raw_left_pitch is not None and raw_right_pitch is not None:
-        raw_combined_pitch = (raw_left_pitch + raw_right_pitch) / 2.0
-
-    payload = {
-        "type": evt.type,
-        "hasFace": evt.has_face,
-        "landmarkCount": evt.landmark_count,
-        "ts": evt.ts,
-        "zeta": evt.zeta,
-        "head_yaw": evt.head_yaw,
-        "head_pitch": evt.head_pitch,
-        "head_x": evt.camera_x,
-        "head_y": evt.camera_y,
-        "head_z": evt.camera_z,
-        "head_raw_transform_z": evt.raw_transform_z,
-        "raw_left_eye_gaze_yaw": raw_left_yaw,
-        "raw_left_eye_gaze_pitch": raw_left_pitch,
-        "raw_right_eye_gaze_yaw": raw_right_yaw,
-        "raw_right_eye_gaze_pitch": raw_right_pitch,
-        "raw_combined_eye_gaze_yaw": raw_combined_yaw,
-        "raw_combined_eye_gaze_pitch": raw_combined_pitch,
-    }
-    if calibrated_evt is not None and evt.has_face:
-        corrected_yaw = calibrated_evt.corrected_yaw
-        corrected_pitch = calibrated_evt.corrected_pitch
-        corrected_screen_x = calibrated_evt.corrected_screen_x
-        corrected_screen_y = calibrated_evt.corrected_screen_y
-        overlay_x = (
-            float(corrected_screen_x) if corrected_screen_x is not None else None
-        )
-        overlay_y = (
-            float(corrected_screen_y) if corrected_screen_y is not None else None
-        )
-        payload["face_delta_yaw"] = calibrated_evt.face_delta_yaw
-        payload["face_delta_pitch"] = calibrated_evt.face_delta_pitch
-        payload["corrected_eye_yaw"] = calibrated_evt.corrected_eye_yaw
-        payload["corrected_eye_pitch"] = calibrated_evt.corrected_eye_pitch
-        payload["corrected_yaw"] = corrected_yaw
-        payload["corrected_pitch"] = corrected_pitch
-        payload["corrected_screen_x"] = corrected_screen_x
-        payload["corrected_screen_y"] = corrected_screen_y
-        payload["corrected_yaw_linear"] = calibrated_evt.corrected_yaw_linear
-        payload["corrected_pitch_linear"] = calibrated_evt.corrected_pitch_linear
-        payload["head_ref_x"] = calibrated_evt.head_ref_x
-        payload["head_ref_y"] = calibrated_evt.head_ref_y
-        payload["head_ref_z"] = calibrated_evt.head_ref_z
-        payload["origin_x"] = calibrated_evt.origin_x
-        payload["origin_y"] = calibrated_evt.origin_y
-        payload["display_width"] = calibrated_evt.display_width
-        payload["display_height"] = calibrated_evt.display_height
-        payload["center_eye_yaw"] = calibrated_evt.yaw_calibration
-        payload["center_eye_pitch"] = calibrated_evt.pitch_calibration
-        payload["face_center_yaw"] = calibrated_evt.face_center_yaw
-        payload["face_center_pitch"] = calibrated_evt.face_center_pitch
-        payload["face_center_x"] = calibrated_evt.face_center_x
-        payload["face_center_y"] = calibrated_evt.face_center_y
-        payload["face_center_z"] = calibrated_evt.face_center_z
-        payload["center_zeta"] = calibrated_evt.center_zeta
-        payload["yaw_coefficient_positive"] = calibrated_evt.yaw_coefficient_positive
-        payload["yaw_coefficient_negative"] = calibrated_evt.yaw_coefficient_negative
-        payload["pitch_coefficient_positive"] = calibrated_evt.pitch_coefficient_positive
-        payload["pitch_coefficient_negative"] = calibrated_evt.pitch_coefficient_negative
-        payload["yaw_from_pitch_coupling"] = calibrated_evt.yaw_from_pitch_coupling
-        payload["pitch_from_yaw_coupling"] = calibrated_evt.pitch_from_yaw_coupling
-        payload["eye_yaw_min"] = calibrated_evt.eye_yaw_min
-        payload["eye_yaw_max"] = calibrated_evt.eye_yaw_max
-        payload["eye_pitch_min"] = calibrated_evt.eye_pitch_min
-        payload["eye_pitch_max"] = calibrated_evt.eye_pitch_max
-        payload["screen_center_cam_x"] = calibrated_evt.screen_center_cam_x
-        payload["screen_center_cam_y"] = calibrated_evt.screen_center_cam_y
-        payload["screen_center_cam_z"] = calibrated_evt.screen_center_cam_z
-        payload["screen_axis_x_x"] = calibrated_evt.screen_axis_x_x
-        payload["screen_axis_x_y"] = calibrated_evt.screen_axis_x_y
-        payload["screen_axis_x_z"] = calibrated_evt.screen_axis_x_z
-        payload["screen_axis_y_x"] = calibrated_evt.screen_axis_y_x
-        payload["screen_axis_y_y"] = calibrated_evt.screen_axis_y_y
-        payload["screen_axis_y_z"] = calibrated_evt.screen_axis_y_z
-        payload["screen_scale_x"] = calibrated_evt.screen_scale_x
-        payload["screen_scale_y"] = calibrated_evt.screen_scale_y
-        payload["screen_fit_rmse"] = calibrated_evt.screen_fit_rmse
-        payload["overlay_x"] = overlay_x
-        payload["overlay_y"] = overlay_y
-    return payload
-
-
 class FrameDispatcher:
     """Synchronous frame processing dispatcher coordinating pipeline steps."""
 
     def __init__(
         self,
         args,
-        calibration=None,
         overlay_manager=None,
         state_machine=None,
         face_mesh_step=None,
         calibration_adapter_step=None,
-        capture_step=None,
-        overlay_step=None,
         gaze_smoothing_step=None,
         opentrack_forward_step=None,
         freetrack_forward_step=None,
     ):
         self.args = args
-        self.calibration = calibration
         self.overlay_manager = overlay_manager
         self.state_machine = state_machine
         self.face_mesh_step = face_mesh_step
         self.calibration_adapter_step = calibration_adapter_step
-        self.capture_step = capture_step
-        self.overlay_step = overlay_step
         self.gaze_smoothing_step = gaze_smoothing_step
         self.opentrack_forward_step = opentrack_forward_step
         self.freetrack_forward_step = freetrack_forward_step
@@ -193,13 +79,7 @@ class FrameDispatcher:
         self.display: Optional[Dict] = None
         self.running = False
 
-        self.display_width = 0
-        self.display_height = 0
-        self.origin_x = 0.0
-        self.origin_y = 0.0
-
         self._latest_evt: Optional[FaceMeshEvent] = None
-        self._latest_calibrated_evt: Optional[CalibratedFaceAndGazeEvent] = None
 
     def start(self):
         """Initialize display geometry."""
@@ -231,21 +111,10 @@ class FrameDispatcher:
         calibrated_evt = None
         if self.calibration_adapter_step is not None:
             calibrated_evt = self.calibration_adapter_step.receive_frame(frame, evt)
-        self._latest_calibrated_evt = calibrated_evt
 
         pipeline_frame = frame
         if not run_downstream:
             return calibrated_evt, pipeline_frame
-
-        if self.overlay_step is not None:
-            overlay_frame = self.overlay_step.receive_frame(
-                pipeline_frame, evt, calibrated_evt
-            )
-            if overlay_frame is not None:
-                pipeline_frame = overlay_frame
-
-        if self.capture_step is not None:
-            self.capture_step.receive_frame(pipeline_frame, evt, calibrated_evt)
 
         gaze = None
         if self.gaze_smoothing_step is not None:
@@ -274,154 +143,44 @@ class FrameDispatcher:
         current_point: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """Build one calibration diagnostic sample for offline analysis."""
-        payload: Dict[str, Any] = {
+        has_face = bool(evt is not None and evt.has_face)
+        position = evt.eye_position if has_face else None
+        return {
             "frameTimestampMs": int(timestamp_ms),
             "phase": str(phase),
-            "target": {
-                "name": current_point.get("name") if current_point else None,
-                "x": current_point.get("x") if current_point else None,
-                "y": current_point.get("y") if current_point else None,
-                "noseX": current_point.get("nose_x") if current_point else None,
-                "noseY": current_point.get("nose_y") if current_point else None,
-                "eyeX": current_point.get("eye_x") if current_point else None,
-                "eyeY": current_point.get("eye_y") if current_point else None,
-                "instruction": current_point.get("instruction") if current_point else None,
-            },
-            "eventTimestampMs": None,
-            "hasFace": False,
-            "landmarkCount": 0,
-            "headYaw": None,
-            "headPitch": None,
-            "headX": None,
-            "headY": None,
-            "headZ": None,
-            "roll": None,
-            "zeta": None,
-            "rawCombinedEyeYaw": None,
-            "rawCombinedEyePitch": None,
-            "rawLeftEyeYaw": None,
-            "rawLeftEyePitch": None,
-            "rawRightEyeYaw": None,
-            "rawRightEyePitch": None,
-            "faceDeltaYaw": None,
-            "faceDeltaPitch": None,
-            "correctedEyeYaw": None,
-            "correctedEyePitch": None,
-            "correctedYaw": None,
-            "correctedPitch": None,
-            "correctedScreenX": None,
-            "correctedScreenY": None,
-            "rawInputs": None,
+            "target": current_point,
+            "hasFace": has_face,
+            "headYaw": evt.head_yaw if has_face else None,
+            "headPitch": evt.head_pitch if has_face else None,
+            "headRoll": evt.roll if has_face else None,
+            "eyePositionMm": position.tolist() if position is not None else None,
+            "rawEye": (
+                [evt.combined_eye_gaze_yaw, evt.combined_eye_gaze_pitch]
+                if has_face
+                else None
+            ),
+            "geometryInputs": evt.geometry_inputs() if has_face else None,
+            "gaze": calibrated_evt.gaze.to_dict() if calibrated_evt else None,
         }
-        if evt is None:
-            return payload
-
-        payload["eventTimestampMs"] = int(evt.ts)
-        payload["hasFace"] = bool(evt.has_face)
-        payload["landmarkCount"] = int(evt.landmark_count)
-        payload["headYaw"] = evt.head_yaw
-        payload["headPitch"] = evt.head_pitch
-        payload["headX"] = evt.camera_x
-        payload["headY"] = evt.camera_y
-        payload["headZ"] = evt.camera_z
-        payload["roll"] = evt.roll
-        payload["zeta"] = evt.zeta
-        payload["rawCombinedEyeYaw"] = evt.combined_eye_gaze_yaw
-        payload["rawCombinedEyePitch"] = evt.combined_eye_gaze_pitch
-        payload["rawLeftEyeYaw"] = evt.left_eye_gaze_yaw
-        payload["rawLeftEyePitch"] = evt.left_eye_gaze_pitch
-        payload["rawRightEyeYaw"] = evt.right_eye_gaze_yaw
-        payload["rawRightEyePitch"] = evt.right_eye_gaze_pitch
-        if calibrated_evt is not None:
-            payload["faceDeltaYaw"] = calibrated_evt.face_delta_yaw
-            payload["faceDeltaPitch"] = calibrated_evt.face_delta_pitch
-            payload["correctedEyeYaw"] = calibrated_evt.corrected_eye_yaw
-            payload["correctedEyePitch"] = calibrated_evt.corrected_eye_pitch
-            payload["correctedYaw"] = calibrated_evt.corrected_yaw
-            payload["correctedPitch"] = calibrated_evt.corrected_pitch
-            payload["correctedScreenX"] = calibrated_evt.corrected_screen_x
-            payload["correctedScreenY"] = calibrated_evt.corrected_screen_y
-        payload["rawInputs"] = evt.raw_mesh_inputs_dict()
-        return payload
 
     def _save_calibration_session_data(
         self,
         session_timestamp_ms: int,
         samples: List[Dict[str, Any]],
         points: List[CalibrationPoint],
-        calib_matrix: Optional[CalibrationMatrix],
+        model: Optional[GazeModel],
     ) -> Path:
         """Persist one calibration session payload for diagnostics."""
         CALIBRATION_DATA_DIR.mkdir(parents=True, exist_ok=True)
-        profile_name = getattr(self.args, "calibration_profile", "") or "default"
         payload = {
+            "modelVersion": CALIBRATION_MODEL_VERSION,
             "sessionTimestampMs": int(session_timestamp_ms),
-            "profile": profile_name,
+            "profile": getattr(self.args, "calibration_profile", "") or "default",
+            "display": self.display,
             "sampleCount": len(samples),
             "samples": samples,
-            "points": [
-                {
-                    "name": p.name,
-                    "screenX": p.screen_x,
-                    "screenY": p.screen_y,
-                    "rawEyeYaw": p.raw_eye_yaw,
-                    "rawEyePitch": p.raw_eye_pitch,
-                    "rawLeftEyeYaw": p.raw_left_eye_yaw,
-                    "rawLeftEyePitch": p.raw_left_eye_pitch,
-                    "rawRightEyeYaw": p.raw_right_eye_yaw,
-                    "rawRightEyePitch": p.raw_right_eye_pitch,
-                    "headYaw": p.head_yaw,
-                    "headPitch": p.head_pitch,
-                    "zeta": p.zeta,
-                    "headX": p.head_x,
-                    "headY": p.head_y,
-                    "headZ": p.head_z,
-                    "noseTargetX": p.nose_target_x,
-                    "noseTargetY": p.nose_target_y,
-                    "eyeTargetX": p.eye_target_x,
-                    "eyeTargetY": p.eye_target_y,
-                    "sampleCount": p.sample_count,
-                }
-                for p in points
-            ],
-            "calibrationMatrix": (
-                {
-                    "centerYaw": calib_matrix.center_yaw,
-                    "centerPitch": calib_matrix.center_pitch,
-                    "faceCenterYaw": calib_matrix.face_center_yaw,
-                    "faceCenterPitch": calib_matrix.face_center_pitch,
-                    "centerZeta": calib_matrix.center_zeta,
-                    "yawCoefficientPositive": calib_matrix.yaw_coefficient_positive,
-                    "yawCoefficientNegative": calib_matrix.yaw_coefficient_negative,
-                    "pitchCoefficientPositive": calib_matrix.pitch_coefficient_positive,
-                    "pitchCoefficientNegative": calib_matrix.pitch_coefficient_negative,
-                    "yawFromPitchCoupling": calib_matrix.yaw_from_pitch_coupling,
-                    "pitchFromYawCoupling": calib_matrix.pitch_from_yaw_coupling,
-                    "eyeYawMin": calib_matrix.eye_yaw_min,
-                    "eyeYawMax": calib_matrix.eye_yaw_max,
-                    "eyePitchMin": calib_matrix.eye_pitch_min,
-                    "eyePitchMax": calib_matrix.eye_pitch_max,
-                    "faceCenterX": calib_matrix.face_center_x,
-                    "faceCenterY": calib_matrix.face_center_y,
-                    "faceCenterZ": calib_matrix.face_center_z,
-                    "screenCenterCamX": calib_matrix.screen_center_cam_x,
-                    "screenCenterCamY": calib_matrix.screen_center_cam_y,
-                    "screenCenterCamZ": calib_matrix.screen_center_cam_z,
-                    "screenAxisXX": calib_matrix.screen_axis_x_x,
-                    "screenAxisXY": calib_matrix.screen_axis_x_y,
-                    "screenAxisXZ": calib_matrix.screen_axis_x_z,
-                    "screenAxisYX": calib_matrix.screen_axis_y_x,
-                    "screenAxisYY": calib_matrix.screen_axis_y_y,
-                    "screenAxisYZ": calib_matrix.screen_axis_y_z,
-                    "screenScaleX": calib_matrix.screen_scale_x,
-                    "screenScaleY": calib_matrix.screen_scale_y,
-                    "screenFitRmse": calib_matrix.screen_fit_rmse,
-                    "sampleCount": calib_matrix.sample_count,
-                    "timestampMs": calib_matrix.timestamp_ms,
-                }
-                if calib_matrix is not None
-                else None
-            ),
+            "points": [point.to_dict() for point in points],
+            "model": model.to_dict() if model is not None else None,
         }
         path = CALIBRATION_DATA_DIR / f"calibration_session_{session_timestamp_ms}.json"
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -449,9 +208,8 @@ class FrameDispatcher:
     def _save_calibration_datapoint(
         self,
         calib_point: CalibrationPoint,
-        evt: Any,
+        evt: Optional[FaceMeshEvent],
         frame: Any,
-        calibrated_evt: Optional[CalibratedFaceAndGazeEvent],
         timestamp_ms: int,
     ) -> None:
         """Dump per-point diagnostics (overlayed PNG + JSON) named by point position."""
@@ -459,73 +217,25 @@ class FrameDispatcher:
             return
         CALIBRATION_DATAPOINT_DIR.mkdir(parents=True, exist_ok=True)
         name = str(calib_point.name)
-        png_path = CALIBRATION_DATAPOINT_DIR / f"{name}.png"
-        json_path = CALIBRATION_DATAPOINT_DIR / f"{name}.json"
-
-        landmarks = None
-        if isinstance(evt, FaceMeshEvent) and evt.landmarks:
-            landmarks = list(evt.landmarks)
-        elif isinstance(evt, dict):
-            landmarks = evt.get("landmarks")
-        snap = {"evt": evt, "frame": frame, "landmarks": landmarks}
-        nose_click = (
-            float(calib_point.nose_target_x)
-            if calib_point.nose_target_x is not None
-            else float(calib_point.screen_x),
-            float(calib_point.nose_target_y)
-            if calib_point.nose_target_y is not None
-            else float(calib_point.screen_y),
-        )
+        landmarks = list(evt.landmarks) if evt is not None and evt.landmarks else None
         img, err = build_camera_capture_marked_image(
-            snap,
+            {"evt": evt, "frame": frame, "landmarks": landmarks},
             overlay_w=float(self.display["width"]),
             overlay_h=float(self.display["height"]),
-            click_pos=nose_click,
+            click_pos=calib_point.nose_target_px,
             draw_click=True,
             draw_info_panel=True,
         )
         if img is not None:
-            cv2.imwrite(str(png_path), img)
+            cv2.imwrite(str(CALIBRATION_DATAPOINT_DIR / f"{name}.png"), img)
         elif err:
             logger.warning("Calibration datapoint image failed for %s: %s", name, err)
 
-        payload = {
-            "timestamp_ms": timestamp_ms,
-            "name": name,
-            "target": {
-                "screen_x": float(calib_point.screen_x),
-                "screen_y": float(calib_point.screen_y),
-                "nose_x": calib_point.nose_target_x,
-                "nose_y": calib_point.nose_target_y,
-                "eye_x": calib_point.eye_target_x,
-                "eye_y": calib_point.eye_target_y,
-            },
-            "head": {
-                "yaw": calib_point.head_yaw,
-                "pitch": calib_point.head_pitch,
-                "x_mm": calib_point.head_x,
-                "y_mm": calib_point.head_y,
-                "z_mm": calib_point.head_z,
-                "zeta_mm": calib_point.zeta,
-            },
-            "gaze": {
-                "raw_eye_yaw": calib_point.raw_eye_yaw,
-                "raw_eye_pitch": calib_point.raw_eye_pitch,
-                "raw_left_eye_yaw": calib_point.raw_left_eye_yaw,
-                "raw_left_eye_pitch": calib_point.raw_left_eye_pitch,
-                "raw_right_eye_yaw": calib_point.raw_right_eye_yaw,
-                "raw_right_eye_pitch": calib_point.raw_right_eye_pitch,
-            },
-            "sample_count": calib_point.sample_count,
-        }
-        if calibrated_evt is not None:
-            payload["calibrated_gaze"] = {
-                "gaze_x": getattr(calibrated_evt, "gaze_x", None),
-                "gaze_y": getattr(calibrated_evt, "gaze_y", None),
-            }
+        payload = {"timestamp_ms": timestamp_ms, "point": calib_point.to_dict()}
         try:
-            with json_path.open("w", encoding="utf-8") as handle:
-                json.dump(payload, handle, indent=2)
+            (CALIBRATION_DATAPOINT_DIR / f"{name}.json").write_text(
+                json.dumps(payload, indent=2), encoding="utf-8"
+            )
         except OSError as exc:
             logger.warning("Calibration datapoint JSON failed for %s: %s", name, exc)
 
@@ -571,9 +281,7 @@ class FrameDispatcher:
             if overlay_enabled:
                 overlay_manager = RuntimeOverlayManager(
                     self.display,
-                    capture_enabled=False,
                     overlay_fps=self.args.overlay_fps,
-                    click_through=True,
                 )
                 overlay_manager.initialize()
 
@@ -608,8 +316,6 @@ class FrameDispatcher:
                 )
                 frames_since_log += 1
 
-                runtime_evt = enrich_runtime_evt(evt, calibrated_evt)
-
                 if not quiet and log_interval > 0:
                     now = time.time()
                     if now - last_log_time >= log_interval:
@@ -643,14 +349,15 @@ class FrameDispatcher:
                                 f"in {elapsed:.1f}s"
                             )
                             last_jump_count = jump_count
-                        if evt is not None and evt.has_face:
+                        if calibrated_evt is not None:
+                            gaze = calibrated_evt.gaze
                             logger.info(
-                                f"Face detected - landmarks: {evt.landmark_count} "
-                                f"head=({safe_float(evt.head_yaw):.1f}, {safe_float(evt.head_pitch):.1f}) "
-                                f"gaze=({safe_float(evt.combined_eye_gaze_yaw):.1f}, "
-                                f"{safe_float(evt.combined_eye_gaze_pitch):.1f}) "
-                                f"position=({safe_float(evt.x):.1f}, {safe_float(evt.y):.1f}, {safe_float(evt.z):.1f})"
+                                f"Gaze ({gaze.yaw:.1f}, {gaze.pitch:.1f}) deg on screen, "
+                                f"head ({evt.head_yaw:.1f}, {evt.head_pitch:.1f}), "
+                                f"eye ({gaze.eye_yaw:.1f}, {gaze.eye_pitch:.1f})"
                             )
+                        elif evt is not None and evt.has_face:
+                            logger.info("Face detected, no calibrated gaze")
                         elif evt is not None:
                             logger.info("No face detected")
 
@@ -678,7 +385,7 @@ class FrameDispatcher:
                     )
 
                 if capture_window_manager is not None:
-                    capture_window_manager.render(runtime_evt, capture_live_img)
+                    capture_window_manager.render(evt, calibrated_evt, capture_live_img)
                     if not capture_window_manager.is_running():
                         running = False
                         break
@@ -694,11 +401,11 @@ class FrameDispatcher:
                                 clicked,
                                 frame,
                                 evt,
-                                runtime_evt=runtime_evt,
+                                calibrated_evt,
                             )
 
                 if overlay_manager is not None:
-                    overlay_manager.render_mesh(runtime_evt)
+                    overlay_manager.render(calibrated_evt)
         finally:
             if overlay_manager is not None:
                 overlay_manager.shutdown()
@@ -706,11 +413,17 @@ class FrameDispatcher:
                 capture_window_manager.shutdown()
 
     def run_calibration_workflow(
-        self, camera_reader
-    ) -> Tuple[Optional[CalibrationMatrix], List[CalibrationPoint]]:
+        self, camera_reader, viewing_distance_mm: float
+    ) -> Optional[GazeModel]:
         """Execute the 9-point calibration workflow with on-screen guidance."""
         if self.display is None:
             raise RuntimeError("FrameDispatcher not started")
+        screen = Screen.from_display(self.display)
+        if screen is None:
+            raise RuntimeError(
+                "The display does not report its physical size, which calibration needs "
+                "to place the targets in millimetres."
+            )
         self.start_calibration()
 
         logger.info("Starting 9-point calibration workflow...")
@@ -770,206 +483,66 @@ class FrameDispatcher:
                     )
                 )
 
-                evt_dict = enrich_runtime_evt(evt, calibrated_evt)
-
-                completed, calib_point = self.overlay_manager.update_calibration_state(
-                    evt_dict
-                )
-                self.overlay_manager.render_mesh(evt_dict)
+                completed, calib_point = self.overlay_manager.update_calibration_state(evt)
+                self.overlay_manager.render()
 
                 if calib_point is not None:
                     calib_points.append(calib_point)
-
                     print(
-                        f"Calibration point {len(calib_points)}/9 completed at '{calib_point.name}' "
-                        f"head=({calib_point.head_yaw:.2f}, {calib_point.head_pitch:.2f}) "
-                        f"head_xyz=({calib_point.head_x:.3f}, {calib_point.head_y:.3f}, {calib_point.head_z:.3f}) "
-                        f"eye=({calib_point.raw_eye_yaw:.2f}, {calib_point.raw_eye_pitch:.2f}) "
-                        f"zeta={calib_point.zeta:.2f}",
+                        f"Calibration point {len(calib_points)}/9 completed at "
+                        f"'{calib_point.name}' from {calib_point.sample_count} frames",
                         flush=True,
                     )
-
                     self._save_calibration_datapoint(
                         calib_point=calib_point,
                         evt=evt,
                         frame=frame,
-                        calibrated_evt=calibrated_evt,
                         timestamp_ms=timestamp_ms,
                     )
 
                 if completed:
-                    if len(calib_points) == 9:
-                        print("All 9 calibration points collected.", flush=True)
-                    else:
-                        print(
-                            f"Calibration sequence ended with {len(calib_points)} points.",
-                            flush=True,
-                        )
                     break
 
                 time.sleep(0.001)
 
-            calib_matrix = None
+            model = None
             if len(calib_points) == 9:
-                print("Computing calibration matrix...", flush=True)
-                display = getattr(self, "display", None) or {}
-                width_px = float(display.get("width", 0) or 0)
-                height_px = float(display.get("height", 0) or 0)
-                width_mm = float(display.get("width_mm", 0) or 0)
-                height_mm = float(display.get("height_mm", 0) or 0)
-                px_per_mm_x = width_px / width_mm if width_px > 0 and width_mm > 0 else None
-                px_per_mm_y = height_px / height_mm if height_px > 0 and height_mm > 0 else None
-                if px_per_mm_x and px_per_mm_y:
-                    print(
-                        f"Display physical size: {width_px:.0f}x{height_px:.0f}px / "
-                        f"{width_mm:.0f}x{height_mm:.0f}mm => "
-                        f"scales=({px_per_mm_x:.3f}, {px_per_mm_y:.3f}) px/mm",
-                        flush=True,
-                    )
-                else:
-                    print(
-                        "Display physical size unavailable; falling back to unconstrained fit",
-                        flush=True,
-                    )
-                calib_matrix = compute_calibration_matrix(
-                    calib_points,
-                    px_per_mm_x=px_per_mm_x,
-                    px_per_mm_y=px_per_mm_y,
+                profile = CalibrationProfile(
+                    screen=screen,
+                    viewing_distance_mm=viewing_distance_mm,
+                    points=tuple(calib_points),
                 )
-
-                profile_name = (
-                    getattr(self.args, "calibration_profile", "") or "default"
-                )
-                calib_path = save_calibration(calib_matrix, calib_points, profile_name)
-
-                print(f"Calibration saved to: {calib_path}", flush=True)
-
-                origin_x = safe_float(
-                    getattr(
-                        next((p for p in calib_points if p.name == "C"), calib_points[0]),
-                        "screen_x",
-                        0.0,
-                    ),
-                    0.0,
-                )
-                origin_y = safe_float(
-                    getattr(
-                        next((p for p in calib_points if p.name == "C"), calib_points[0]),
-                        "screen_y",
-                        0.0,
-                    ),
-                    0.0,
-                )
-                print("Calibration round-trip (eye target vs apply):", flush=True)
-                pixel_errors: List[float] = []
+                model = profile.fit()
+                profile_name = getattr(self.args, "calibration_profile", "") or "default"
+                print(f"Calibration saved to: {save_calibration(profile, profile_name)}", flush=True)
+                print(f"Calibration model: {model.describe()}", flush=True)
                 for point in calib_points:
-                    result = apply_calibration_model(
-                        raw_eye_yaw=point.raw_eye_yaw,
-                        raw_eye_pitch=point.raw_eye_pitch,
-                        head_yaw=point.head_yaw,
-                        head_pitch=point.head_pitch,
-                        head_x=point.head_x,
-                        head_y=point.head_y,
-                        head_z=point.head_z,
-                        center_eye_yaw=calib_matrix.center_yaw,
-                        center_eye_pitch=calib_matrix.center_pitch,
-                        face_center_yaw=calib_matrix.face_center_yaw,
-                        face_center_pitch=calib_matrix.face_center_pitch,
-                        yaw_coefficient_positive=calib_matrix.yaw_coefficient_positive,
-                        yaw_coefficient_negative=calib_matrix.yaw_coefficient_negative,
-                        pitch_coefficient_positive=calib_matrix.pitch_coefficient_positive,
-                        pitch_coefficient_negative=calib_matrix.pitch_coefficient_negative,
-                        yaw_from_pitch_coupling=calib_matrix.yaw_from_pitch_coupling,
-                        pitch_from_yaw_coupling=calib_matrix.pitch_from_yaw_coupling,
-                        eye_yaw_min=calib_matrix.eye_yaw_min,
-                        eye_yaw_max=calib_matrix.eye_yaw_max,
-                        eye_pitch_min=calib_matrix.eye_pitch_min,
-                        eye_pitch_max=calib_matrix.eye_pitch_max,
-                        center_zeta=calib_matrix.center_zeta,
-                        face_center_x=calib_matrix.face_center_x,
-                        face_center_y=calib_matrix.face_center_y,
-                        face_center_z=calib_matrix.face_center_z,
-                        screen_center_cam_x=calib_matrix.screen_center_cam_x,
-                        screen_center_cam_y=calib_matrix.screen_center_cam_y,
-                        screen_center_cam_z=calib_matrix.screen_center_cam_z,
-                        screen_axis_x_x=calib_matrix.screen_axis_x_x,
-                        screen_axis_x_y=calib_matrix.screen_axis_x_y,
-                        screen_axis_x_z=calib_matrix.screen_axis_x_z,
-                        screen_axis_y_x=calib_matrix.screen_axis_y_x,
-                        screen_axis_y_y=calib_matrix.screen_axis_y_y,
-                        screen_axis_y_z=calib_matrix.screen_axis_y_z,
-                        screen_scale_x=calib_matrix.screen_scale_x,
-                        screen_scale_y=calib_matrix.screen_scale_y,
-                        screen_fit_rmse=calib_matrix.screen_fit_rmse,
-                        origin_x=origin_x,
-                        origin_y=origin_y,
-                    )
-                    got_x = result.get("corrected_screen_x")
-                    got_y = result.get("corrected_screen_y")
-                    target_x = (
-                        point.eye_target_x
-                        if point.eye_target_x is not None
-                        else point.screen_x
-                    )
-                    target_y = (
-                        point.eye_target_y
-                        if point.eye_target_y is not None
-                        else point.screen_y
-                    )
-                    if got_x is None or got_y is None:
-                        print(f"  {point.name:>3s}: projection failed", flush=True)
-                        continue
-                    err_x = float(got_x) - float(target_x)
-                    err_y = float(got_y) - float(target_y)
-                    pixel_errors.append(math.hypot(err_x, err_y))
+                    error = model.point_errors_px(point)
                     print(
-                        f"  {point.name:>3s}: target=({float(target_x):7.1f},{float(target_y):7.1f}) "
-                        f"apply=({float(got_x):7.1f},{float(got_y):7.1f}) "
-                        f"err=({err_x:+7.1f},{err_y:+7.1f})px",
+                        f"  {point.name:>3s}: "
+                        + (
+                            "gaze misses the screen plane"
+                            if error is None
+                            else f"gaze {error[0]:+7.1f}, {error[1]:+7.1f} px from the eye target"
+                        ),
                         flush=True,
                     )
-                if pixel_errors:
-                    max_err = max(pixel_errors)
-                    mean_err = sum(pixel_errors) / len(pixel_errors)
-                    print(
-                        f"  round-trip pixel error: mean={mean_err:.2f}px max={max_err:.2f}px",
-                        flush=True,
-                    )
-
-                print(
-                    "Calibration matrix: "
-                    f"eye_zero=({calib_matrix.center_yaw:.4f}, {calib_matrix.center_pitch:.4f}) "
-                    f"face_zero=({calib_matrix.face_center_yaw:.4f}, {calib_matrix.face_center_pitch:.4f}) "
-                    f"yaw_coeff=({calib_matrix.yaw_coefficient_negative:.4f}, {calib_matrix.yaw_coefficient_positive:.4f}) "
-                    f"pitch_coeff=({calib_matrix.pitch_coefficient_negative:.4f}, {calib_matrix.pitch_coefficient_positive:.4f}) "
-                    f"cross=({calib_matrix.yaw_from_pitch_coupling:.4f}, {calib_matrix.pitch_from_yaw_coupling:.4f}) "
-                    f"eye_yaw_range=({calib_matrix.eye_yaw_min:.4f}, {calib_matrix.eye_yaw_max:.4f}) "
-                    f"eye_pitch_range=({calib_matrix.eye_pitch_min:.4f}, {calib_matrix.eye_pitch_max:.4f}) "
-                    f"screen_scale=({calib_matrix.screen_scale_x:.4f}, {calib_matrix.screen_scale_y:.4f}) "
-                    f"zeta={calib_matrix.center_zeta:.4f} "
-                    f"screen_fit_rmse={calib_matrix.screen_fit_rmse:.4f} "
-                    f"samples={calib_matrix.sample_count}",
-                    flush=True,
-                )
+                self.set_model(model)
+                self.start_operational()
             else:
                 print(
-                    f"Insufficient calibration points ({len(calib_points)}/9). Cannot compute calibration matrix.",
+                    f"Calibration ended with {len(calib_points)}/9 points; nothing was saved.",
                     flush=True,
                 )
-
-            if calib_matrix is not None:
-                self.set_calibration(calib_matrix)
-                self.start_operational()
 
             calibration_data_path = self._save_calibration_session_data(
                 session_timestamp_ms=session_timestamp_ms,
                 samples=calibration_samples,
                 points=calib_points,
-                calib_matrix=calib_matrix,
+                model=model,
             )
             print(f"Calibration diagnostics saved to: {calibration_data_path}", flush=True)
-
-            return calib_matrix, calib_points
+            return model
 
         except Exception as e:
             print(f"Error during calibration: {e}", flush=True)
@@ -980,43 +553,10 @@ class FrameDispatcher:
                 self.overlay_manager.shutdown()
                 print("Calibration overlay shutdown complete.", flush=True)
 
-    def set_calibration(self, calibration: CalibrationMatrix) -> None:
-        """Apply a new calibration matrix to the dispatcher."""
-        self.calibration = calibration
+    def set_model(self, model: GazeModel) -> None:
+        """Use a new calibration model for the gaze output."""
         if self.calibration_adapter_step is not None:
-            self.calibration_adapter_step.update_calibration(
-                pitch=calibration.center_pitch,
-                yaw=calibration.center_yaw,
-                roll=0.0,
-                face_center_yaw=calibration.face_center_yaw,
-                face_center_pitch=calibration.face_center_pitch,
-                center_zeta=calibration.center_zeta,
-                yaw_coefficient_positive=calibration.yaw_coefficient_positive,
-                yaw_coefficient_negative=calibration.yaw_coefficient_negative,
-                pitch_coefficient_positive=calibration.pitch_coefficient_positive,
-                pitch_coefficient_negative=calibration.pitch_coefficient_negative,
-                yaw_from_pitch_coupling=calibration.yaw_from_pitch_coupling,
-                pitch_from_yaw_coupling=calibration.pitch_from_yaw_coupling,
-                eye_yaw_min=calibration.eye_yaw_min,
-                eye_yaw_max=calibration.eye_yaw_max,
-                eye_pitch_min=calibration.eye_pitch_min,
-                eye_pitch_max=calibration.eye_pitch_max,
-                face_center_x=calibration.face_center_x,
-                face_center_y=calibration.face_center_y,
-                face_center_z=calibration.face_center_z,
-                screen_center_cam_x=calibration.screen_center_cam_x,
-                screen_center_cam_y=calibration.screen_center_cam_y,
-                screen_center_cam_z=calibration.screen_center_cam_z,
-                screen_axis_x_x=calibration.screen_axis_x_x,
-                screen_axis_x_y=calibration.screen_axis_x_y,
-                screen_axis_x_z=calibration.screen_axis_x_z,
-                screen_axis_y_x=calibration.screen_axis_y_x,
-                screen_axis_y_y=calibration.screen_axis_y_y,
-                screen_axis_y_z=calibration.screen_axis_y_z,
-                screen_scale_x=calibration.screen_scale_x,
-                screen_scale_y=calibration.screen_scale_y,
-                screen_fit_rmse=calibration.screen_fit_rmse,
-            )
+            self.calibration_adapter_step.set_model(model)
 
     def get_latest_event(self) -> Optional[FaceMeshEvent]:
         """Return the most recent FaceMeshEvent."""
@@ -1026,17 +566,6 @@ class FrameDispatcher:
         """Check if the dispatcher is actively processing."""
         return self.running
 
-    def _handle_calibration_complete(self, calibration_result: dict) -> None:
-        """Apply completed calibration result and transition to OPERATIONAL state."""
-        pitch = calibration_result.get("pitch", 0.0)
-        yaw = calibration_result.get("yaw", 0.0)
-        roll = calibration_result.get("roll", 0.0)
-
-        self.calibration_adapter_step.update_calibration(
-            pitch=pitch, yaw=yaw, roll=roll
-        )
-        self._transition_state(DispatcherState.OPERATIONAL)
-
     def start_calibration(self) -> None:
         """Transition to CALIBRATION state."""
         self._transition_state(DispatcherState.CALIBRATION)
@@ -1045,47 +574,10 @@ class FrameDispatcher:
         """Transition to OPERATIONAL state."""
         self._transition_state(DispatcherState.OPERATIONAL)
 
-    def set_capture_enabled(self, enabled: bool) -> None:
-        """Enable or disable the capture pipeline step."""
-        if self.capture_step is not None:
-            self.capture_step.set_enabled(enabled)
-
-    def set_overlay_enabled(self, enabled: bool) -> None:
-        """Enable or disable the overlay pipeline step."""
-        if self.overlay_step is not None:
-            self.overlay_step.set_enabled(enabled)
-
-    def set_overlay_show_hud(self, show_hud: bool) -> None:
-        """Toggle HUD display on the overlay step."""
-        if self.overlay_step is not None:
-            self.overlay_step.set_show_hud(show_hud)
-
     def set_opentrack_forwarding_enabled(self, enabled: bool) -> None:
         """Enable or disable OpenTrack data forwarding."""
         if self.opentrack_forward_step is not None:
             self.opentrack_forward_step.set_enabled(enabled)
-
-    def update_calibration(self, pitch: float, yaw: float, roll: float) -> None:
-        """Update the calibration adapter's pitch/yaw/roll offsets."""
-        self.calibration_adapter_step.update_calibration(
-            pitch=pitch, yaw=yaw, roll=roll
-        )
-
-    def update_display_geometry(
-        self, width: int, height: int, origin_x: float, origin_y: float
-    ) -> None:
-        """Propagate new display dimensions to the calibration adapter."""
-        self.display_width = width
-        self.display_height = height
-        self.origin_x = origin_x
-        self.origin_y = origin_y
-
-        self.calibration_adapter_step.update_display_geometry(
-            width=width,
-            height=height,
-            origin_x=origin_x,
-            origin_y=origin_y,
-        )
 
     def get_state(self) -> DispatcherState:
         """Return the current dispatcher state."""

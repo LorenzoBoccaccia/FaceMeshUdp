@@ -18,6 +18,12 @@ pip install -e ".[dev]"
 loads it and publishes to games over FreeTrack (TrackIR interface, 500 ms gaze smoothing, 200 ms tail kept on gaze jumps beyond 5 degrees). Both run from the repository root, use `.venv`, and pass any
 extra arguments through to the app (`start.bat --camera-index 1`).
 
+Measure the distance from your eyes to the screen and pass it to calibration, e.g.
+`.\calibrate.bat --viewing-distance 65`; it is stored in the profile (default 100 cm). The
+gaze model is refitted from the recorded points at every start, so passing
+`--viewing-distance` to `start.bat` corrects it without recalibrating. See
+[docs/calibration.md](docs/calibration.md) for the model.
+
 ```powershell
 .\calibrate.bat
 .\start.bat
@@ -26,7 +32,7 @@ extra arguments through to the app (`start.bat --camera-index 1`).
 Equivalent direct invocation:
 
 ```powershell
-python -m facemesh_app.main --calibrate
+python -m facemesh_app.main --calibrate --viewing-distance 65
 python -m facemesh_app.main --opentrack
 ```
 
@@ -44,7 +50,7 @@ Modes:
 - `--calibrate` / `--calibration` — run the 9-point calibration workflow
 - `--force-recalibrate` — ignore any stored profile and recalibrate
 - `--calibration-profile NAME` — named calibration profile (defaults to `default`)
-- `--calibration-samples N` — minimum samples per point (default: 5)
+- `--viewing-distance CM` — eye-to-screen distance; default the profile's, or 100 for a new calibration
 
 Camera:
 
@@ -62,6 +68,7 @@ OpenTrack:
 
 - `--opentrack-host HOST` (`OPENTRACK_HOST`, default `127.0.0.1`)
 - `--opentrack-port PORT` (`OPENTRACK_PORT`, default 4242)
+- The packet carries the eye position in cm (to your right, up, and away from the camera on MediaPipe's depth scale), the gaze yaw/pitch and head roll
 
 FreeTrack:
 

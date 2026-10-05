@@ -9,10 +9,13 @@ import math
 import time
 from typing import Any, Optional, Dict, List, Tuple
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
 
 
-AVERAGE_IPD_MM = 60.0
+MEDIAPIPE_VERTICAL_FOV_DEG = 63.0
+MM_PER_CM = 10.0
 
 HORIZONTAL_MAX_DEG = 60.0
 VERTICAL_MAX_DEG = 15
@@ -128,47 +131,6 @@ class FaceMeshEvent:
         f = safe_float(v, float("nan"))
         return f if math.isfinite(f) else None
 
-    @staticmethod
-    def _normalize_vec3(vec) -> Optional[List[float]]:
-        if vec is None:
-            return None
-        try:
-            x = float(vec[0])
-            y = float(vec[1])
-            z = float(vec[2])
-        except Exception:
-            return None
-        mag = math.sqrt(x * x + y * y + z * z)
-        if mag <= 1e-9:
-            return None
-        return [x / mag, y / mag, z / mag]
-
-    @staticmethod
-    def _dot3(a: List[float], b: List[float]) -> float:
-        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-
-    @staticmethod
-    def _sub3(a: List[float], b: List[float]) -> List[float]:
-        return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-
-    @staticmethod
-    def _cross3(a: List[float], b: List[float]) -> List[float]:
-        return [
-            a[1] * b[2] - a[2] * b[1],
-            a[2] * b[0] - a[0] * b[2],
-            a[0] * b[1] - a[1] * b[0],
-        ]
-
-    @staticmethod
-    def _mag3(v: List[float]) -> float:
-        return math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
-
-    @staticmethod
-    def _dist2(a: List[float], b: List[float]) -> float:
-        dx = a[0] - b[0]
-        dy = a[1] - b[1]
-        return math.sqrt(dx * dx + dy * dy)
-
     def _transform_flat_no_fallback(self) -> Optional[List[float]]:
         cached = self._cache_get("transform_flat_no_fallback")
         if cached is not _CACHE_MISS:
@@ -214,26 +176,32 @@ class FaceMeshEvent:
             return self._cache_set("transform_m44", None)
         return self._cache_set("transform_m44", [flat[0:4], flat[4:8], flat[8:12], flat[12:16]])
 
-    def _head_rotation(self) -> Optional[List[List[float]]]:
+    @property
+    def head_rotation(self) -> Optional[np.ndarray]:
+        """Rotation from the face's own axes (x to its left, y up, z out of the face) to the camera frame."""
+        cached = self._cache_get("head_rotation")
+        if cached is not _CACHE_MISS:
+            return cached
         m44 = self._transform_m44()
         if m44 is None:
-            return None
-        return [row[0:3] for row in m44[0:3]]
+            return self._cache_set("head_rotation", None)
+        return self._cache_set(
+            "head_rotation", np.array([row[0:3] for row in m44[0:3]], dtype=float)
+        )
 
     def _head_frame_xy(self, point: Optional[List[float]]) -> Optional[List[float]]:
         """Landmark position on the face's own left-right and up-down axes, unaffected by head rotation."""
-        rotation = self._head_rotation()
+        rotation = self.head_rotation
         if point is None or rotation is None:
             return None
-        camera = (
-            point[0] * self.image_width,
-            -point[1] * self.image_height,
-            -point[2] * self.image_width,
+        camera = np.array(
+            [
+                point[0] * self.image_width,
+                -point[1] * self.image_height,
+                -point[2] * self.image_width,
+            ]
         )
-        return [
-            sum(rotation[i][0] * camera[i] for i in range(3)),
-            sum(rotation[i][1] * camera[i] for i in range(3)),
-        ]
+        return list(rotation.T[0:2] @ camera)
 
     @property
     def has_face(self) -> bool:
@@ -251,31 +219,19 @@ class FaceMeshEvent:
 
     @property
     def head_yaw(self) -> Optional[float]:
-        cached = self._cache_get("head_yaw")
-        if cached is not _CACHE_MISS:
-            return cached
-
-        m44 = self._transform_m44()
-        if m44 is None:
-            return self._cache_set("head_yaw", None)
-        face_forward = self._normalize_vec3((-m44[0][2], -m44[1][2], -m44[2][2]))
-        if face_forward is None:
-            return self._cache_set("head_yaw", None)
-        return self._cache_set("head_yaw", math.degrees(math.atan2(face_forward[0], -face_forward[2])))
+        """Head turn toward the user's right, in degrees."""
+        rotation = self.head_rotation
+        if rotation is None:
+            return None
+        return math.degrees(math.atan2(-rotation[0][2], rotation[2][2]))
 
     @property
     def head_pitch(self) -> Optional[float]:
-        cached = self._cache_get("head_pitch")
-        if cached is not _CACHE_MISS:
-            return cached
-
-        m44 = self._transform_m44()
-        if m44 is None:
-            return self._cache_set("head_pitch", None)
-        face_forward = self._normalize_vec3((-m44[0][2], -m44[1][2], -m44[2][2]))
-        if face_forward is None:
-            return self._cache_set("head_pitch", None)
-        return self._cache_set("head_pitch", math.degrees(math.atan2(-face_forward[1], -face_forward[2])))
+        """Head elevation above the camera's horizontal plane, in degrees."""
+        rotation = self.head_rotation
+        if rotation is None:
+            return None
+        return math.degrees(math.asin(clamp(rotation[1][2], -1.0, 1.0)))
 
     @property
     def x(self) -> Optional[float]:
@@ -320,49 +276,20 @@ class FaceMeshEvent:
         return self._cache_set("raw_transform_z", None)
 
     @property
-    def zeta(self) -> Optional[float]:
-        cached = self._cache_get("zeta")
-        if cached is not _CACHE_MISS:
-            return cached
-
-        left = self.left_iris_center
-        right = self.right_iris_center
-        if left is None or right is None:
-            return self._cache_set("zeta", None)
-
-        projected_ipd = self._dist2(left, right)
-        if projected_ipd <= 1e-9:
-            return self._cache_set("zeta", None)
-
-        yaw = abs(safe_float(self.head_yaw, 0.0))
-        pitch = abs(safe_float(self.head_pitch, 0.0))
-        foreshortening = math.cos(math.radians(yaw)) * math.cos(math.radians(pitch))
-        foreshortening = clamp(foreshortening, 0.25, 1.0)
-
-        frontal_projected_ipd = projected_ipd / foreshortening
-        if frontal_projected_ipd <= 1e-9:
-            return self._cache_set("zeta", None)
-
-        return self._cache_set("zeta", AVERAGE_IPD_MM / frontal_projected_ipd)
-
-    @property
-    def z(self) -> Optional[float]:
-        # Intentionally swapped from raw transform Z to IPD-based depth proxy.
-        return self.zeta
-
-    @property
     def roll(self) -> Optional[float]:
-        cached = self._cache_get("roll")
-        if cached is not _CACHE_MISS:
-            return cached
-
-        m44 = self._transform_m44()
-        if m44 is not None:
-            return self._cache_set("roll", math.degrees(math.atan2(m44[0][1], m44[0][0])))
-        flat = self._transform_flat_no_fallback()
-        if flat is not None and len(flat) > 1:
-            return self._cache_set("roll", math.degrees(math.atan2(flat[1], flat[0])))
-        return self._cache_set("roll", None)
+        """Head tilt toward the user's right shoulder about the face's forward axis, in degrees."""
+        rotation = self.head_rotation
+        if rotation is None:
+            return None
+        forward = rotation[:, 2]
+        level_right = np.cross(forward, np.array([0.0, 1.0, 0.0]))
+        norm = np.linalg.norm(level_right)
+        if norm <= 1e-9:
+            return None
+        level_right /= norm
+        level_up = np.cross(level_right, forward)
+        up = rotation[:, 1]
+        return math.degrees(math.atan2(float(up @ level_right), float(up @ level_up)))
 
     @property
     def landmarks(self) -> Optional[List]:
@@ -403,12 +330,6 @@ class FaceMeshEvent:
         self._landmark_xyz_cache[key] = value
         return value
 
-    @staticmethod
-    def _xy(point: Optional[List[float]]) -> Optional[List[float]]:
-        if point is None or len(point) < 2:
-            return None
-        return [point[0], point[1]]
-
     def _landmarks_xyz_by_indices(self, indices: tuple[int, ...]) -> List[List[float]]:
         points: List[List[float]] = []
         for idx in indices:
@@ -416,16 +337,6 @@ class FaceMeshEvent:
             if p is not None:
                 points.append(p)
         return points
-
-    @staticmethod
-    def _center_xyz(points: List[List[float]]) -> Optional[List[float]]:
-        if not points:
-            return None
-        n = float(len(points))
-        sx = sum(p[0] for p in points)
-        sy = sum(p[1] for p in points)
-        sz = sum(p[2] for p in points)
-        return [sx / n, sy / n, sz / n]
 
     @property
     def left_iris_points(self) -> List[List[float]]:
@@ -452,28 +363,39 @@ class FaceMeshEvent:
         return self.landmark_xyz(RIGHT_IRIS_CENTER_IDX)
 
     @property
-    def camera_x(self) -> Optional[float]:
-        left = self.left_iris_center
-        right = self.right_iris_center
-        zeta = self.zeta
-        if left is None or right is None or zeta is None:
-            return None
-        cx = (safe_float(left[0], 0.5) + safe_float(right[0], 0.5)) * 0.5
-        return (cx - 0.5) * zeta
-
-    @property
-    def camera_y(self) -> Optional[float]:
-        left = self.left_iris_center
-        right = self.right_iris_center
-        zeta = self.zeta
-        if left is None or right is None or zeta is None:
-            return None
-        cy = (safe_float(left[1], 0.5) + safe_float(right[1], 0.5)) * 0.5
-        return (cy - 0.5) * zeta
-
-    @property
-    def camera_z(self) -> Optional[float]:
-        return self.zeta
+    def eye_position(self) -> Optional[np.ndarray]:
+        """Midpoint between the eye corners in millimetres, in the camera frame the head pose is reported in."""
+        cached = self._cache_get("eye_position")
+        if cached is not _CACHE_MISS:
+            return cached
+        corners = [
+            self.landmark_xyz(idx)
+            for idx in (
+                LEFT_EYE_INNER_IDX,
+                LEFT_EYE_OUTER_IDX,
+                RIGHT_EYE_INNER_IDX,
+                RIGHT_EYE_OUTER_IDX,
+            )
+        ]
+        head_z_cm = self.raw_transform_z
+        if any(c is None for c in corners) or head_z_cm is None or head_z_cm >= 0:
+            return self._cache_set("eye_position", None)
+        u = sum(c[0] for c in corners) / len(corners) * self.image_width
+        v = sum(c[1] for c in corners) / len(corners) * self.image_height
+        focal_px = (self.image_height / 2.0) / math.tan(
+            math.radians(MEDIAPIPE_VERTICAL_FOV_DEG / 2.0)
+        )
+        depth_mm = -head_z_cm * MM_PER_CM
+        return self._cache_set(
+            "eye_position",
+            np.array(
+                [
+                    (u - self.image_width / 2.0) * depth_mm / focal_px,
+                    -(v - self.image_height / 2.0) * depth_mm / focal_px,
+                    -depth_mm,
+                ]
+            ),
+        )
 
     @property
     def left_eye_key_points(self) -> List[List[float]]:
@@ -483,56 +405,24 @@ class FaceMeshEvent:
     def right_eye_key_points(self) -> List[List[float]]:
         return self._landmarks_xyz_by_indices(RIGHT_EYE_KEY_IDXS)
 
-    def _eye_raw_input_points(
-        self,
-        iris_center_idx: int,
-        inner_canthus_idx: int,
-        outer_canthus_idx: int,
-        upper_eyelid_idx: int,
-        lower_eyelid_idx: int,
-    ) -> Dict[str, Optional[List[float]]]:
-        iris_center_xyz = self.landmark_xyz(iris_center_idx)
-        inner_canthus_xyz = self.landmark_xyz(inner_canthus_idx)
-        outer_canthus_xyz = self.landmark_xyz(outer_canthus_idx)
-        upper_eyelid_xyz = self.landmark_xyz(upper_eyelid_idx)
-        lower_eyelid_xyz = self.landmark_xyz(lower_eyelid_idx)
-
-        iris_center = self._xy(iris_center_xyz)
-        inner_canthus = self._xy(inner_canthus_xyz)
-        outer_canthus = self._xy(outer_canthus_xyz)
-        upper_eyelid = self._xy(upper_eyelid_xyz)
-        lower_eyelid = self._xy(lower_eyelid_xyz)
+    def geometry_inputs(self) -> Dict[str, Any]:
+        """Everything the head pose, eye position and eye angles are derived from, for offline analysis."""
         return {
-            "irisCenter": iris_center,
-            "innerCanthus": inner_canthus,
-            "outerCanthus": outer_canthus,
-            "upperEyelid": upper_eyelid,
-            "lowerEyelid": lower_eyelid,
-            "irisCenterXY": iris_center,
-            "innerCanthusXY": inner_canthus,
-            "outerCanthusXY": outer_canthus,
-            "upperEyelidXY": upper_eyelid,
-            "lowerEyelidXY": lower_eyelid,
-        }
-
-    def raw_mesh_inputs_dict(self) -> Dict[str, Any]:
-        return {
-            "gazeAndDepth": {
-                "leftEye": self._eye_raw_input_points(
+            "imageSize": [self.image_width, self.image_height],
+            "transformMatrix": self.transform_matrix_as_flat(),
+            "landmarks": {
+                str(idx): self.landmark_xyz(idx)
+                for idx in (
                     LEFT_IRIS_CENTER_IDX,
+                    RIGHT_IRIS_CENTER_IDX,
                     LEFT_EYE_INNER_IDX,
                     LEFT_EYE_OUTER_IDX,
-                    LEFT_EYE_UPPER_IDX,
-                    LEFT_EYE_LOWER_IDX,
-                ),
-                "rightEye": self._eye_raw_input_points(
-                    RIGHT_IRIS_CENTER_IDX,
                     RIGHT_EYE_INNER_IDX,
                     RIGHT_EYE_OUTER_IDX,
-                    RIGHT_EYE_UPPER_IDX,
-                    RIGHT_EYE_LOWER_IDX,
-                ),
-            }
+                    NOSE_BRIDGE_IDX,
+                    NOSE_BASE_IDX,
+                )
+            },
         }
 
     @staticmethod
@@ -547,19 +437,7 @@ class FaceMeshEvent:
         iris_center_point: Optional[List[float]],
         inner_canthus_point: Optional[List[float]],
         outer_canthus_point: Optional[List[float]],
-        upper_eyelid_point: Optional[List[float]],
-        lower_eyelid_point: Optional[List[float]],
     ) -> Optional[tuple[float, float]]:
-
-        if (
-            iris_center_point is None
-            or inner_canthus_point is None
-            or outer_canthus_point is None
-            or upper_eyelid_point is None
-            or lower_eyelid_point is None
-        ):
-            return None
-
         iris_center_xy = self._head_frame_xy(iris_center_point)
         inner_canthus_xy = self._head_frame_xy(inner_canthus_point)
         outer_canthus_xy = self._head_frame_xy(outer_canthus_point)
@@ -616,8 +494,6 @@ class FaceMeshEvent:
             self.left_iris_center,
             self.landmark_xyz(LEFT_EYE_INNER_IDX),
             self.landmark_xyz(LEFT_EYE_OUTER_IDX),
-            self.landmark_xyz(LEFT_EYE_UPPER_IDX),
-            self.landmark_xyz(LEFT_EYE_LOWER_IDX),
         )
         return self._cache_set("left_eye_raw_yaw_pitch", value)
 
@@ -629,8 +505,6 @@ class FaceMeshEvent:
             self.right_iris_center,
             self.landmark_xyz(RIGHT_EYE_INNER_IDX),
             self.landmark_xyz(RIGHT_EYE_OUTER_IDX),
-            self.landmark_xyz(RIGHT_EYE_UPPER_IDX),
-            self.landmark_xyz(RIGHT_EYE_LOWER_IDX),
         )
         return self._cache_set("right_eye_raw_yaw_pitch", value)
 
@@ -801,16 +675,6 @@ class FaceMeshEvent:
             "combinedEyeGazePitch": self.combined_eye_gaze_pitch,
             "leftEyeKeyPoints": self.left_eye_key_points,
             "rightEyeKeyPoints": self.right_eye_key_points,
-            "zeta": self.zeta,
-        }
-
-    def to_overlay_dict(self) -> Dict:
-        return {
-            "type": self.type,
-            "hasFace": self.has_face,
-            "landmarkCount": self.landmark_count,
-            "ts": self.ts,
-            "zeta": self.zeta,
         }
 
     def to_capture_dict(self) -> Dict:
@@ -820,7 +684,7 @@ class FaceMeshEvent:
             "transformMatrix": self.transform_matrix_as_flat(),
             "faceMaskSegment": self.face_mask_segment_meta(),
             "eyes": self.eyes_dict(),
-            "rawInputs": self.raw_mesh_inputs_dict(),
+            "geometryInputs": self.geometry_inputs(),
         }
 
     def to_capture_dump(self) -> Dict[str, Any]:
@@ -837,15 +701,11 @@ class FaceMeshEvent:
             "translation": {
                 "x": self.x,
                 "y": self.y,
-                "z": self.z,
-                "rawTransformZ": self.raw_transform_z,
-                "cameraX": self.camera_x,
-                "cameraY": self.camera_y,
-                "cameraZ": self.camera_z,
+                "z": self.raw_transform_z,
             },
+            "eyePositionMm": (
+                self.eye_position.tolist() if self.eye_position is not None else None
+            ),
             "meshData": self.to_capture_dict(),
         }
-
-    def to_dict(self) -> Dict:
-        return self.to_overlay_dict()
 

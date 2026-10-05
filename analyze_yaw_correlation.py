@@ -44,24 +44,16 @@ def load_yaw_correlation_data(
     return combined
 
 
-def extract_head_angles(result: Dict[str, Any]) -> Optional[Tuple[float, float, float]]:
-    """Extract yaw, pitch, roll from facial transformation matrix."""
-    matrix = result.get("facial_transformation_matrix")
-    if matrix is None or len(matrix) < 16:
+def extract_head_angles(
+    result: Dict[str, Any], image_size: Tuple[int, int]
+) -> Optional[Tuple[float, float, float]]:
+    """Head yaw, pitch and roll exactly as the runtime derives them."""
+    if result.get("facial_transformation_matrix") is None:
         return None
-
-    m44 = [
-        [matrix[0], matrix[1], matrix[2], matrix[3]],
-        [matrix[4], matrix[5], matrix[6], matrix[7]],
-        [matrix[8], matrix[9], matrix[10], matrix[11]],
-        [matrix[12], matrix[13], matrix[14], matrix[15]],
-    ]
-
-    face_forward = [-m44[0][2], -m44[1][2], -m44[2][2]]
-    yaw = math.degrees(math.atan2(face_forward[0], -face_forward[2]))
-    pitch = math.degrees(math.atan2(-face_forward[1], -face_forward[2]))
-    roll = math.degrees(math.atan2(m44[0][1], m44[0][0]))
-    return yaw, pitch, roll
+    event = FaceMeshEvent.from_landmarker_result(
+        _create_mock_result(result), image_size=image_size
+    )
+    return event.head_yaw, event.head_pitch, event.roll
 
 
 def _create_mock_result(raw_result: Dict[str, Any]) -> Any:
@@ -165,7 +157,7 @@ def print_table(data: Dict[str, Any]) -> None:
         eye_pos = point.get("eyePosition", "").upper()
         result = point.get("rawResult", {})
 
-        head_angles = extract_head_angles(result)
+        head_angles = extract_head_angles(result, image_size)
         head_yaw_str = f"{head_angles[0]:+7.2f}" if head_angles else "n/a"
 
         eye_gaze = extract_eye_gaze(result, image_size)
@@ -229,7 +221,7 @@ def analyze_yaw_consistency(data: Dict[str, Any]) -> bool:
                 break
 
         if sample_point:
-            head_angles = extract_head_angles(sample_point.get("rawResult", {}))
+            head_angles = extract_head_angles(sample_point.get("rawResult", {}), image_size)
             if head_angles:
                 yaw, _, _ = head_angles
                 head_yaw_values[head_pos] = yaw

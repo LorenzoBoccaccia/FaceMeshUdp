@@ -8,7 +8,8 @@ from typing import Any, Dict, Optional, Tuple
 import cv2
 import numpy as np
 
-from .facemesh_dao import clamp, safe_float
+from .calibration import CalibratedFaceAndGazeEvent
+from .facemesh_dao import FaceMeshEvent, clamp
 from .gaze_primitives import collect_gaze_primitives, draw_gaze_primitives_cv2
 
 
@@ -24,7 +25,7 @@ class CaptureWindowManager:
         self._mouse_x = float(self._width) * 0.5
         self._mouse_y = float(self._height) * 0.5
         self._clicked: Optional[Tuple[float, float]] = None
-        self._capture_fps = 0.0
+        self._frame_seconds = 0.0
         self._last_tick = time.perf_counter()
 
     def initialize(self) -> None:
@@ -61,11 +62,12 @@ class CaptureWindowManager:
 
     def render(
         self,
-        runtime_evt: Optional[Dict[str, Any]],
+        face_event: Optional[FaceMeshEvent],
+        calibrated_event: Optional[CalibratedFaceAndGazeEvent],
         live_img: Optional[np.ndarray],
     ) -> None:
         """Render one capture frame and handle keyboard exit."""
-        out = self._build_frame(runtime_evt, live_img)
+        out = self._build_frame(face_event, calibrated_event, live_img)
         cv2.imshow(self._window_name, out)
         key = cv2.waitKey(1) & 0xFF
         if key in (27, ord("q")):
@@ -81,7 +83,8 @@ class CaptureWindowManager:
 
     def _build_frame(
         self,
-        runtime_evt: Optional[Dict[str, Any]],
+        face_event: Optional[FaceMeshEvent],
+        calibrated_event: Optional[CalibratedFaceAndGazeEvent],
         live_img: Optional[np.ndarray],
     ) -> np.ndarray:
         if live_img is not None:
@@ -96,65 +99,38 @@ class CaptureWindowManager:
 
         now_tick = time.perf_counter()
         dt = now_tick - self._last_tick
-        if dt > 1e-6:
-            inst = 1.0 / dt
-            if self._capture_fps <= 0.0:
-                self._capture_fps = inst
-            else:
-                self._capture_fps = 0.9 * self._capture_fps + 0.1 * inst
+        self._frame_seconds = dt if self._frame_seconds <= 0.0 else 0.9 * self._frame_seconds + 0.1 * dt
         self._last_tick = now_tick
 
-        primitives = collect_gaze_primitives(runtime_evt, self._width, self._height)
-        draw_gaze_primitives_cv2(out, primitives, radius=14, outline_thickness=2)
-        self._draw_hud(out, runtime_evt)
+        draw_gaze_primitives_cv2(out, collect_gaze_primitives(calibrated_event), radius=14)
+        self._draw_hud(out, face_event, calibrated_event)
         self._draw_mouse_triangle(out, self._mouse_x, self._mouse_y, (255, 255, 255))
         return out
 
-    def _draw_hud(self, img: np.ndarray, evt: Optional[Dict[str, Any]]) -> None:
-        has_face = bool(evt and evt.get("hasFace"))
+    def _draw_hud(
+        self,
+        img: np.ndarray,
+        face_event: Optional[FaceMeshEvent],
+        calibrated_event: Optional[CalibratedFaceAndGazeEvent],
+    ) -> None:
+        def _fmt(*values: Optional[float]) -> str:
+            return " / ".join("--" if v is None else f"{v:0.1f}" for v in values)
 
-        raw_head_yaw = evt.get("head_yaw") if evt else None
-        raw_head_pitch = evt.get("head_pitch") if evt else None
-        raw_eye_yaw = evt.get("raw_combined_eye_gaze_yaw") if evt else None
-        raw_eye_pitch = evt.get("raw_combined_eye_gaze_pitch") if evt else None
-        corr_head_yaw = evt.get("face_delta_yaw") if evt else None
-        corr_head_pitch = evt.get("face_delta_pitch") if evt else None
-        corr_eye_yaw = evt.get("corrected_eye_yaw") if evt else None
-        corr_eye_pitch = evt.get("corrected_eye_pitch") if evt else None
-        corr_sum_yaw = evt.get("corrected_yaw") if evt else None
-        corr_sum_pitch = evt.get("corrected_pitch") if evt else None
-        head_x = evt.get("head_x") if evt else None
-        head_y = evt.get("head_y") if evt else None
-        head_z = evt.get("head_z") if evt else None
-
-        raw_sum_yaw = None
-        raw_sum_pitch = None
-        if (
-            raw_head_yaw is not None
-            and raw_head_pitch is not None
-            and raw_eye_yaw is not None
-            and raw_eye_pitch is not None
-        ):
-            raw_sum_yaw = safe_float(raw_head_yaw, 0.0) + safe_float(raw_eye_yaw, 0.0)
-            raw_sum_pitch = safe_float(raw_head_pitch, 0.0) + safe_float(
-                raw_eye_pitch, 0.0
-            )
-
-        def _fmt(value: Optional[float]) -> str:
-            if value is None:
-                return "--"
-            return f"{safe_float(value, 0.0):0.1f}"
-
+        has_face = bool(face_event and face_event.has_face)
+        position = face_event.eye_position if has_face else None
+        gaze = calibrated_event.gaze if calibrated_event is not None else None
+        fps = 1.0 / self._frame_seconds if self._frame_seconds > 1e-6 else 0.0
         lines = [
             f"FACE: {'YES' if has_face else 'NO'}",
-            f"FPS: {self._capture_fps:0.1f}",
-            f"HEAD XYZ: {_fmt(head_x)} / {_fmt(head_y)} / {_fmt(head_z)}",
-            f"RAW FACE Y/P: {_fmt(raw_head_yaw)} / {_fmt(raw_head_pitch)}",
-            f"RAW EYE  Y/P: {_fmt(raw_eye_yaw)} / {_fmt(raw_eye_pitch)}",
-            f"RAW SUM  Y/P: {_fmt(raw_sum_yaw)} / {_fmt(raw_sum_pitch)}",
-            f"CORR FACE Y/P: {_fmt(corr_head_yaw)} / {_fmt(corr_head_pitch)}",
-            f"CORR EYE  Y/P: {_fmt(corr_eye_yaw)} / {_fmt(corr_eye_pitch)}",
-            f"CORR SUM  Y/P: {_fmt(corr_sum_yaw)} / {_fmt(corr_sum_pitch)}",
+            f"FPS: {fps:0.1f}",
+            "HEAD Y/P/R: "
+            + (_fmt(face_event.head_yaw, face_event.head_pitch, face_event.roll) if has_face else "--"),
+            "EYE POS mm: " + (_fmt(*position) if position is not None else "--"),
+            "RAW EYE Y/P: "
+            + (_fmt(face_event.combined_eye_gaze_yaw, face_event.combined_eye_gaze_pitch) if has_face else "--"),
+            "EYE Y/P: " + (_fmt(gaze.eye_yaw, gaze.eye_pitch) if gaze else "--"),
+            "GAZE Y/P: " + (_fmt(gaze.yaw, gaze.pitch) if gaze else "--"),
+            "SCREEN px: " + (_fmt(*gaze.screen_px) if gaze else "--"),
         ]
 
         font = cv2.FONT_HERSHEY_SIMPLEX

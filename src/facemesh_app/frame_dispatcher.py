@@ -555,7 +555,7 @@ class FrameDispatcher:
         h = int(self.display["height"])
         overlay_manager: Optional[RuntimeOverlayManager] = None
         capture_window_manager: Optional[CaptureWindowManager] = None
-        last_log_time = 0.0
+        last_log_time = time.time()
         running = True
         pixel_format = camera_reader.pixel_format
 
@@ -613,9 +613,7 @@ class FrameDispatcher:
                 if not quiet and log_interval > 0:
                     now = time.time()
                     if now - last_log_time >= log_interval:
-                        elapsed = (
-                            now - last_log_time if last_log_time > 0 else log_interval
-                        )
+                        elapsed = now - last_log_time
                         processed_fps = (
                             frames_since_log / elapsed if elapsed > 0 else 0.0
                         )

@@ -299,9 +299,10 @@ def _set_registry_path(key_path: str, location: str) -> None:
 class FreeTrackForwardStep:
     """Final pipeline step: Publish the calibrated gaze to games over the FreeTrack 2.0 Enhanced interface.
 
-    Games see the view rotation opentrack's freetrack protocol would give them for the
-    pose the OpenTrack step forwards, scaled by the output multiplier so a small gaze shift
-    can turn the game view further. opentrack has to be installed but not running.
+    Games see the gaze yaw and pitch as the view rotation opentrack's freetrack protocol
+    would give them, scaled by the output multiplier so a small gaze shift can turn the
+    game view further; roll and position stay at zero. opentrack has to be installed but
+    not running.
     """
 
     def __init__(
@@ -408,6 +409,7 @@ class FreeTrackForwardStep:
                 "or any other head tracker using the freetrack protocol and try again."
             )
         try:
+            ctypes.memset(ctypes.addressof(self._heap.data), 0, ctypes.sizeof(FTData))
             self._heap.GameID2 = 0
             ctypes.memset(self._heap.table, 0, ctypes.sizeof(self._heap.table))
         finally:

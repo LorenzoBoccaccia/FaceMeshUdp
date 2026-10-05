@@ -14,15 +14,13 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
 from facemesh_app._mediapipe_lazy import apply_lazy_landmarks_patch
-from facemesh_app.calibration import load_calibration
+from facemesh_app.calibration import DEFAULT_VIEWING_DISTANCE_MM, load_calibration
 from facemesh_app.camera_reader import CameraReader
+from facemesh_app.facemesh_dao import MM_PER_CM
 from facemesh_app.frame_dispatcher import FrameDispatcher, ensure_model, MODEL_PATH
-from facemesh_app.overlay_common import get_display_geo
 from facemesh_app.pipeline_steps import (
     FaceMeshStep,
     CalibrationAdapterStep,
-    CaptureStep,
-    OverlayStep,
     GazeSmoothingStep,
     OpenTrackForwardStep,
 )
@@ -132,10 +130,13 @@ def parse_args():
         help="Ignore existing calibration and recalibrate",
     )
     parser.add_argument(
-        "--calibration-samples",
-        type=int,
-        default=5,
-        help="Minimum number of calibration samples to collect (default: 5)",
+        "--viewing-distance",
+        type=float,
+        default=None,
+        metavar="CM",
+        help="Distance from the eyes to the screen in centimetres (default: the "
+        f"calibrated profile's distance, or {DEFAULT_VIEWING_DISTANCE_MM / MM_PER_CM:g} "
+        "for a new calibration)",
     )
 
     parser.add_argument(
@@ -187,6 +188,8 @@ def parse_args():
         parser.error("--smooth-reset must be at least 0 and shorter than --smooth")
     if args.smooth_threshold <= 0:
         parser.error("--smooth-threshold must be a positive number of degrees")
+    if args.viewing_distance is not None and args.viewing_distance <= 0:
+        parser.error("--viewing-distance must be a positive number of centimetres")
     if args.freetrack_multiplier <= 0:
         parser.error("--freetrack-multiplier must be a positive factor")
     if args.freetrack and sys.platform != "win32":
@@ -239,53 +242,44 @@ def main():
         or args.force_recalibrate
     )
 
-    calibration = None
-    if not args.force_recalibrate and not args.calibrate and not args.calibration:
-        try:
-            calibration, _ = load_calibration(args.calibration_profile)
-        except Exception as e:
-            logger.warning(
-                f"Failed to load calibration profile '{args.calibration_profile}': {e}"
-            )
-            calibration = None
-
-        if calibration is not None and calibration.sample_count > 0:
-            profile_name = args.calibration_profile or "default"
-            logger.info(
-                f"Loaded calibration from profile '{profile_name}': "
-                f"eye_zero=({calibration.center_yaw:.4f}, {calibration.center_pitch:.4f}) "
-                f"face_zero=({calibration.face_center_yaw:.4f}, {calibration.face_center_pitch:.4f}) "
-                f"yaw_coeff=({calibration.yaw_coefficient_negative:.4f}, {calibration.yaw_coefficient_positive:.4f}) "
-                f"pitch_coeff=({calibration.pitch_coefficient_negative:.4f}, {calibration.pitch_coefficient_positive:.4f}) "
-                f"cross=({calibration.yaw_from_pitch_coupling:.4f}, {calibration.pitch_from_yaw_coupling:.4f}) "
-                f"eye_yaw_range=({calibration.eye_yaw_min:.4f}, {calibration.eye_yaw_max:.4f}) "
-                f"eye_pitch_range=({calibration.eye_pitch_min:.4f}, {calibration.eye_pitch_max:.4f}) "
-                f"screen_scale=({calibration.screen_scale_x:.4f}, {calibration.screen_scale_y:.4f}) "
-                f"zeta={calibration.center_zeta:.4f} "
-                f"screen_fit_rmse={calibration.screen_fit_rmse:.4f} "
-                f"samples={calibration.sample_count}",
-            )
+    viewing_distance_mm = (
+        args.viewing_distance * MM_PER_CM if args.viewing_distance is not None else None
+    )
+    profile_name = args.calibration_profile or "default"
+    calibrating = args.calibrate or args.calibration or args.force_recalibrate
+    model = None
+    if not calibrating:
+        profile = load_calibration(args.calibration_profile)
+        if profile is not None:
+            model = profile.fit(viewing_distance_mm)
+            logger.info(f"Calibration '{profile_name}': {model.describe()}")
         else:
-            logger.info("No existing calibration found. Running in uncalibrated mode.")
+            logger.info(f"No usable calibration for profile '{profile_name}'.")
 
     auto_transition_to_opentrack = False
     if no_explicit_mode:
-        if calibration is not None and calibration.sample_count > 0:
+        if model is not None:
             args.opentrack = True
             logger.info(
                 "No mode specified; existing calibration found. Starting OpenTrack forwarder."
             )
         else:
             args.calibrate = True
+            calibrating = True
             auto_transition_to_opentrack = True
             logger.info(
                 "No mode specified and no calibration on disk. "
                 "Running calibration, then OpenTrack forwarder."
             )
+    if model is None and not calibrating and (args.freetrack or args.opentrack):
+        _exit_with(
+            RuntimeError(
+                f"Gaze output needs a calibration for profile '{profile_name}'. "
+                "Run calibrate.bat (or --calibrate) first."
+            )
+        )
 
     state_machine = StateMachine()
-
-    display = get_display_geo()
 
     try:
         ensure_model()
@@ -311,82 +305,7 @@ def main():
 
     face_mesh_step = FaceMeshStep(face_landmarker)
 
-    pitch_calib = calibration.center_pitch if calibration else 0.0
-    yaw_calib = calibration.center_yaw if calibration else 0.0
-    roll_calib = 0.0
-    face_center_yaw = calibration.face_center_yaw if calibration else 0.0
-    face_center_pitch = calibration.face_center_pitch if calibration else 0.0
-    center_zeta = calibration.center_zeta if calibration else 1200.0
-    yaw_coefficient_positive = calibration.yaw_coefficient_positive if calibration else 1.0
-    yaw_coefficient_negative = calibration.yaw_coefficient_negative if calibration else 1.0
-    pitch_coefficient_positive = (
-        calibration.pitch_coefficient_positive if calibration else 1.0
-    )
-    pitch_coefficient_negative = (
-        calibration.pitch_coefficient_negative if calibration else 1.0
-    )
-    yaw_from_pitch_coupling = calibration.yaw_from_pitch_coupling if calibration else 0.0
-    pitch_from_yaw_coupling = calibration.pitch_from_yaw_coupling if calibration else 0.0
-    eye_yaw_min = calibration.eye_yaw_min if calibration else -1.0
-    eye_yaw_max = calibration.eye_yaw_max if calibration else 1.0
-    eye_pitch_min = calibration.eye_pitch_min if calibration else -1.0
-    eye_pitch_max = calibration.eye_pitch_max if calibration else 1.0
-    face_center_x = calibration.face_center_x if calibration else 0.0
-    face_center_y = calibration.face_center_y if calibration else 0.0
-    face_center_z = calibration.face_center_z if calibration else center_zeta
-    screen_center_cam_x = calibration.screen_center_cam_x if calibration else 0.0
-    screen_center_cam_y = calibration.screen_center_cam_y if calibration else 0.0
-    screen_center_cam_z = calibration.screen_center_cam_z if calibration else center_zeta
-    screen_axis_x_x = calibration.screen_axis_x_x if calibration else 1.0
-    screen_axis_x_y = calibration.screen_axis_x_y if calibration else 0.0
-    screen_axis_x_z = calibration.screen_axis_x_z if calibration else 0.0
-    screen_axis_y_x = calibration.screen_axis_y_x if calibration else 0.0
-    screen_axis_y_y = calibration.screen_axis_y_y if calibration else 1.0
-    screen_axis_y_z = calibration.screen_axis_y_z if calibration else 0.0
-    screen_scale_x = calibration.screen_scale_x if calibration else 1.0
-    screen_scale_y = calibration.screen_scale_y if calibration else 1.0
-    screen_fit_rmse = calibration.screen_fit_rmse if calibration else -1.0
-    calibration_adapter_step = CalibrationAdapterStep(
-        pitch_calibration=pitch_calib,
-        yaw_calibration=yaw_calib,
-        roll_calibration=roll_calib,
-        face_center_yaw=face_center_yaw,
-        face_center_pitch=face_center_pitch,
-        center_zeta=center_zeta,
-        yaw_coefficient_positive=yaw_coefficient_positive,
-        yaw_coefficient_negative=yaw_coefficient_negative,
-        pitch_coefficient_positive=pitch_coefficient_positive,
-        pitch_coefficient_negative=pitch_coefficient_negative,
-        yaw_from_pitch_coupling=yaw_from_pitch_coupling,
-        pitch_from_yaw_coupling=pitch_from_yaw_coupling,
-        eye_yaw_min=eye_yaw_min,
-        eye_yaw_max=eye_yaw_max,
-        eye_pitch_min=eye_pitch_min,
-        eye_pitch_max=eye_pitch_max,
-        face_center_x=face_center_x,
-        face_center_y=face_center_y,
-        face_center_z=face_center_z,
-        screen_center_cam_x=screen_center_cam_x,
-        screen_center_cam_y=screen_center_cam_y,
-        screen_center_cam_z=screen_center_cam_z,
-        screen_axis_x_x=screen_axis_x_x,
-        screen_axis_x_y=screen_axis_x_y,
-        screen_axis_x_z=screen_axis_x_z,
-        screen_axis_y_x=screen_axis_y_x,
-        screen_axis_y_y=screen_axis_y_y,
-        screen_axis_y_z=screen_axis_y_z,
-        screen_scale_x=screen_scale_x,
-        screen_scale_y=screen_scale_y,
-        screen_fit_rmse=screen_fit_rmse,
-        display_width=display["width"],
-        display_height=display["height"],
-        origin_x=float(display["width"]) / 2.0,
-        origin_y=float(display["height"]) / 2.0,
-    )
-
-    capture_step = CaptureStep(enabled=False)
-
-    overlay_step = OverlayStep(enabled=False, show_hud=False)
+    calibration_adapter_step = CalibrationAdapterStep(model)
 
     gaze_smoothing_step = GazeSmoothingStep(
         window_ms=args.smooth,
@@ -425,13 +344,10 @@ def main():
 
     frame_dispatcher = FrameDispatcher(
         args,
-        calibration=calibration,
         overlay_manager=None,
         state_machine=state_machine,
         face_mesh_step=face_mesh_step,
         calibration_adapter_step=calibration_adapter_step,
-        capture_step=capture_step,
-        overlay_step=overlay_step,
         gaze_smoothing_step=gaze_smoothing_step,
         opentrack_forward_step=opentrack_forward_step,
         freetrack_forward_step=freetrack_forward_step,
@@ -442,12 +358,15 @@ def main():
         frame_dispatcher.start()
         camera_reader.open()
 
-        if args.calibrate or args.calibration:
+        if calibrating:
             frame_dispatcher.start_calibration()
             logger.info("Running calibration workflow...")
-            calib_matrix, _ = frame_dispatcher.run_calibration_workflow(camera_reader)
+            calibrated_model = frame_dispatcher.run_calibration_workflow(
+                camera_reader,
+                viewing_distance_mm or DEFAULT_VIEWING_DISTANCE_MM,
+            )
             if auto_transition_to_opentrack:
-                if calib_matrix is None:
+                if calibrated_model is None:
                     logger.info(
                         "Calibration did not complete; OpenTrack forwarder will not start."
                     )

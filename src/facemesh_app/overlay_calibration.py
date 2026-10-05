@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Tuple
 import pygame
 
 from .calibration import CalibrationPoint
-from .facemesh_dao import safe_float
+from .facemesh_dao import FaceMeshEvent
 from .overlay_common import (
     BLACK,
     BLUE,
@@ -52,7 +52,8 @@ class CalibrationOverlayManager:
         self._current_calib_idx: int = 0
         self._calib_phase: str = "idle"
         self._calib_phase_start: int = 0
-        self._calib_samples: List[Dict] = []
+        self._calib_samples: List[FaceMeshEvent] = []
+        self._retry_point = False
         self._center_x: float = 0.0
         self._center_y: float = 0.0
         self._click_pending: bool = False
@@ -90,9 +91,8 @@ class CalibrationOverlayManager:
             elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
                 self._click_pending = True
 
-    def render_mesh(self, evt: Optional[Dict]):
+    def render(self):
         """Render one calibration frame."""
-        _ = evt
         self._screen.fill(BLACK)
         if self._calib_phase != "idle":
             current_point = self.get_current_calib_point()
@@ -139,182 +139,45 @@ class CalibrationOverlayManager:
         return self._calib_phase in ("blink", "capture")
 
     def update_calibration_state(
-        self, evt: Dict
+        self, evt: Optional[FaceMeshEvent]
     ) -> Tuple[bool, Optional[CalibrationPoint]]:
-        """Advance calibration state and emit points when sampling completes."""
+        """Advance calibration and emit a point once its capture window held usable face frames."""
         current_time = int(time.time() * 1000)
         elapsed_ms = current_time - self._calib_phase_start
         current_point = self.get_current_calib_point()
-        fallback_zeta = max(self._width, self._height) * 0.75
-
         if current_point is None:
             return True, None
 
         if self._calib_phase == "wait_click":
             if self._click_pending:
-                self._click_pending = False
-                self._calib_phase = "blink"
-                self._calib_phase_start = current_time
-
+                self._enter_phase("blink", current_time)
         elif self._calib_phase == "blink":
             self._click_pending = False
             if elapsed_ms >= CALIB_BLINK_MS:
-                self._calib_phase = "capture"
-                self._calib_phase_start = current_time
-                self._calib_samples = []
-
+                self._enter_phase("capture", current_time)
         elif self._calib_phase == "capture":
-            if evt:
-                combined_yaw = evt.get("raw_combined_eye_gaze_yaw")
-                combined_pitch = evt.get("raw_combined_eye_gaze_pitch")
-                if combined_yaw is not None and combined_pitch is not None:
-                    left_eye_yaw = evt.get("raw_left_eye_gaze_yaw")
-                    left_eye_pitch = evt.get("raw_left_eye_gaze_pitch")
-                    right_eye_yaw = evt.get("raw_right_eye_gaze_yaw")
-                    right_eye_pitch = evt.get("raw_right_eye_gaze_pitch")
-                    head_yaw = evt.get("head_yaw")
-                    head_pitch = evt.get("head_pitch")
-                    zeta = evt.get("zeta")
-                    head_x = evt.get("head_x")
-                    head_y = evt.get("head_y")
-                    head_z = evt.get("head_z")
-                    self._calib_samples.append(
-                        {
-                            "eye_yaw": combined_yaw,
-                            "eye_pitch": combined_pitch,
-                            "left_eye_yaw": (
-                                left_eye_yaw if left_eye_yaw is not None else combined_yaw
-                            ),
-                            "left_eye_pitch": (
-                                left_eye_pitch
-                                if left_eye_pitch is not None
-                                else combined_pitch
-                            ),
-                            "right_eye_yaw": (
-                                right_eye_yaw
-                                if right_eye_yaw is not None
-                                else combined_yaw
-                            ),
-                            "right_eye_pitch": (
-                                right_eye_pitch
-                                if right_eye_pitch is not None
-                                else combined_pitch
-                            ),
-                            "head_yaw": head_yaw,
-                            "head_pitch": head_pitch,
-                            "zeta": zeta,
-                            "head_x": head_x,
-                            "head_y": head_y,
-                            "head_z": head_z,
-                        }
-                    )
-
+            if evt is not None:
+                self._calib_samples.append(evt)
             if elapsed_ms >= CALIB_CAPTURE_MS:
-                if self._calib_samples:
-                    avg_yaw = sum(s["eye_yaw"] for s in self._calib_samples) / len(
-                        self._calib_samples
-                    )
-                    avg_pitch = sum(s["eye_pitch"] for s in self._calib_samples) / len(
-                        self._calib_samples
-                    )
-                    avg_left_yaw = sum(
-                        s["left_eye_yaw"] for s in self._calib_samples
-                    ) / len(self._calib_samples)
-                    avg_left_pitch = sum(
-                        s["left_eye_pitch"] for s in self._calib_samples
-                    ) / len(self._calib_samples)
-                    avg_right_yaw = sum(
-                        s["right_eye_yaw"] for s in self._calib_samples
-                    ) / len(self._calib_samples)
-                    avg_right_pitch = sum(
-                        s["right_eye_pitch"] for s in self._calib_samples
-                    ) / len(self._calib_samples)
-                    avg_head_yaw = sum(
-                        safe_float(s.get("head_yaw"), 0.0) for s in self._calib_samples
-                    ) / len(self._calib_samples)
-                    avg_head_pitch = sum(
-                        safe_float(s.get("head_pitch"), 0.0)
-                        for s in self._calib_samples
-                    ) / len(self._calib_samples)
-                    avg_zeta = sum(
-                        safe_float(s.get("zeta"), fallback_zeta)
-                        for s in self._calib_samples
-                    ) / len(self._calib_samples)
-                    avg_head_x = sum(
-                        safe_float(s.get("head_x"), 0.0) for s in self._calib_samples
-                    ) / len(self._calib_samples)
-                    avg_head_y = sum(
-                        safe_float(s.get("head_y"), 0.0) for s in self._calib_samples
-                    ) / len(self._calib_samples)
-                    avg_head_z = sum(
-                        safe_float(s.get("head_z"), avg_zeta)
-                        for s in self._calib_samples
-                    ) / len(self._calib_samples)
-
-                    calib_point = CalibrationPoint(
-                        name=current_point["name"],
-                        screen_x=current_point["x"],
-                        screen_y=current_point["y"],
-                        raw_eye_yaw=avg_yaw,
-                        raw_eye_pitch=avg_pitch,
-                        raw_left_eye_yaw=avg_left_yaw,
-                        raw_left_eye_pitch=avg_left_pitch,
-                        raw_right_eye_yaw=avg_right_yaw,
-                        raw_right_eye_pitch=avg_right_pitch,
-                        sample_count=len(self._calib_samples),
-                        head_yaw=avg_head_yaw,
-                        head_pitch=avg_head_pitch,
-                        zeta=avg_zeta,
-                        head_x=avg_head_x,
-                        head_y=avg_head_y,
-                        head_z=avg_head_z,
-                        nose_target_x=current_point.get("nose_x"),
-                        nose_target_y=current_point.get("nose_y"),
-                        eye_target_x=current_point.get("eye_x"),
-                        eye_target_y=current_point.get("eye_y"),
-                    )
-                else:
-                    head_yaw = safe_float(evt.get("head_yaw") if evt else None, 0.0)
-                    head_pitch = safe_float(evt.get("head_pitch") if evt else None, 0.0)
-                    zeta = safe_float(evt.get("zeta") if evt else None, fallback_zeta)
-                    head_x = safe_float(evt.get("head_x") if evt else None, 0.0)
-                    head_y = safe_float(evt.get("head_y") if evt else None, 0.0)
-                    head_z = safe_float(evt.get("head_z") if evt else None, zeta)
-                    calib_point = CalibrationPoint(
-                        name=current_point["name"],
-                        screen_x=current_point["x"],
-                        screen_y=current_point["y"],
-                        raw_eye_yaw=0.0,
-                        raw_eye_pitch=0.0,
-                        raw_left_eye_yaw=0.0,
-                        raw_left_eye_pitch=0.0,
-                        raw_right_eye_yaw=0.0,
-                        raw_right_eye_pitch=0.0,
-                        sample_count=0,
-                        head_yaw=head_yaw,
-                        head_pitch=head_pitch,
-                        zeta=zeta,
-                        head_x=head_x,
-                        head_y=head_y,
-                        head_z=head_z,
-                        nose_target_x=current_point.get("nose_x"),
-                        nose_target_y=current_point.get("nose_y"),
-                        eye_target_x=current_point.get("eye_x"),
-                        eye_target_y=current_point.get("eye_y"),
-                    )
-
-                self._current_calib_idx += 1
-                next_point = self.get_current_calib_point()
-                if next_point is None:
-                    return True, calib_point
-
-                self._calib_phase = "wait_click"
-                self._calib_phase_start = current_time
-                self._calib_samples = []
-                self._click_pending = False
-                return False, calib_point
+                calib_point = CalibrationPoint.from_samples(
+                    current_point["name"],
+                    (current_point["nose_x"], current_point["nose_y"]),
+                    (current_point["eye_x"], current_point["eye_y"]),
+                    self._calib_samples,
+                )
+                self._retry_point = calib_point is None
+                if calib_point is not None:
+                    self._current_calib_idx += 1
+                self._enter_phase("wait_click", current_time)
+                return self.get_current_calib_point() is None, calib_point
 
         return False, None
+
+    def _enter_phase(self, phase: str, start_ms: int) -> None:
+        self._calib_phase = phase
+        self._calib_phase_start = start_ms
+        self._calib_samples = []
+        self._click_pending = False
 
     def render_calibration(
         self,
@@ -349,7 +212,11 @@ class CalibrationOverlayManager:
         instruction = current_point.get("instruction", "")
         label = f"Step {self._current_calib_idx + 1}/{len(self._calibration_sequence)}"
         phase_hint = {
-            "wait_click": "Align, hold steady, then CLICK.",
+            "wait_click": (
+                "No face seen — align and CLICK again."
+                if self._retry_point
+                else "Align, hold steady, then CLICK."
+            ),
             "blink": "Hold still — capturing…",
             "capture": "Keep holding — sampling…",
         }.get(phase, "")
@@ -392,8 +259,6 @@ class CalibrationOverlayManager:
         return [
             {
                 "name": "C",
-                "x": center_x,
-                "y": center_y,
                 "nose_x": center_x,
                 "nose_y": center_y,
                 "eye_x": center_x,
@@ -405,8 +270,6 @@ class CalibrationOverlayManager:
             },
             {
                 "name": "T",
-                "x": b[0],
-                "y": b[1],
                 "nose_x": t[0],
                 "nose_y": t[1],
                 "eye_x": b[0],
@@ -415,8 +278,6 @@ class CalibrationOverlayManager:
             },
             {
                 "name": "TL",
-                "x": br[0],
-                "y": br[1],
                 "nose_x": tl[0],
                 "nose_y": tl[1],
                 "eye_x": br[0],
@@ -425,8 +286,6 @@ class CalibrationOverlayManager:
             },
             {
                 "name": "L",
-                "x": r[0],
-                "y": r[1],
                 "nose_x": l[0],
                 "nose_y": l[1],
                 "eye_x": r[0],
@@ -435,8 +294,6 @@ class CalibrationOverlayManager:
             },
             {
                 "name": "BL",
-                "x": tr[0],
-                "y": tr[1],
                 "nose_x": bl[0],
                 "nose_y": bl[1],
                 "eye_x": tr[0],
@@ -445,8 +302,6 @@ class CalibrationOverlayManager:
             },
             {
                 "name": "B",
-                "x": t[0],
-                "y": t[1],
                 "nose_x": b[0],
                 "nose_y": b[1],
                 "eye_x": t[0],
@@ -455,8 +310,6 @@ class CalibrationOverlayManager:
             },
             {
                 "name": "BR",
-                "x": tl[0],
-                "y": tl[1],
                 "nose_x": br[0],
                 "nose_y": br[1],
                 "eye_x": tl[0],
@@ -465,8 +318,6 @@ class CalibrationOverlayManager:
             },
             {
                 "name": "R",
-                "x": l[0],
-                "y": l[1],
                 "nose_x": r[0],
                 "nose_y": r[1],
                 "eye_x": l[0],
@@ -475,8 +326,6 @@ class CalibrationOverlayManager:
             },
             {
                 "name": "TR",
-                "x": bl[0],
-                "y": bl[1],
                 "nose_x": tr[0],
                 "nose_y": tr[1],
                 "eye_x": bl[0],

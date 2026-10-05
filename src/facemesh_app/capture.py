@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 from mediapipe.tasks.python import vision
 
+from .calibration import CalibratedFaceAndGazeEvent
 from .facemesh_dao import (
     FaceMeshEvent,
     safe_float,
@@ -117,9 +118,15 @@ def _build_event_lines(snap_evt: Any, landmarks: List[Any]) -> List[str]:
             f"{_fmt_num(snap_evt.head_yaw, 2)}/{_fmt_num(snap_evt.head_pitch, 2)}/{_fmt_num(snap_evt.roll, 2)}"
         )
         lines.append(
-            "tx/ty/tz="
-            f"{_fmt_num(snap_evt.x, 4)}/{_fmt_num(snap_evt.y, 4)}/{_fmt_num(snap_evt.z, 4)}"
+            "tx/ty/tz cm="
+            f"{_fmt_num(snap_evt.x, 2)}/{_fmt_num(snap_evt.y, 2)}/{_fmt_num(snap_evt.raw_transform_z, 2)}"
         )
+        position = snap_evt.eye_position
+        if position is not None:
+            lines.append(
+                "eye position mm="
+                f"{_fmt_num(position[0], 1)}/{_fmt_num(position[1], 1)}/{_fmt_num(position[2], 1)}"
+            )
 
         mask_meta = snap_evt.face_mask_segment_meta()
         if mask_meta:
@@ -165,59 +172,6 @@ def _build_event_lines(snap_evt: Any, landmarks: List[Any]) -> List[str]:
                 "R="
                 f"{_fmt_num(eyes.get('rightEyeGazeYaw'), 2)}/{_fmt_num(eyes.get('rightEyeGazePitch'), 2)}"
             )
-    elif isinstance(snap_evt, dict):
-        lines.append(f"type={snap_evt.get('type', 'mesh')}")
-        lines.append(f"face={bool(snap_evt.get('hasFace'))} landmarks={len(landmarks)}")
-        blendshapes = snap_evt.get("blendshapes")
-        if isinstance(blendshapes, dict):
-            lines.append(f"blendshapes={len(blendshapes)}")
-        transform = snap_evt.get("transformMatrix")
-        if isinstance(transform, list):
-            lines.append(f"transform values={len(transform)}")
-        eyes = snap_evt.get("eyes")
-        if isinstance(eyes, dict):
-            if isinstance(eyes.get("leftIrisCenter"), list) and isinstance(
-                eyes.get("rightIrisCenter"), list
-            ):
-                lc = eyes.get("leftIrisCenter")
-                rc = eyes.get("rightIrisCenter")
-                lines.append(
-                    "irisCtr L(x,y,z)="
-                    f"{_fmt_num(lc[0], 4)},{_fmt_num(lc[1], 4)},{_fmt_num(lc[2], 4)} "
-                    "R(x,y,z)="
-                    f"{_fmt_num(rc[0], 4)},{_fmt_num(rc[1], 4)},{_fmt_num(rc[2], 4)}"
-                )
-            l_gaze_yaw = eyes.get("leftEyeGazeYaw")
-            l_gaze_pitch = eyes.get("leftEyeGazePitch")
-            r_gaze_yaw = eyes.get("rightEyeGazeYaw")
-            r_gaze_pitch = eyes.get("rightEyeGazePitch")
-            if (
-                l_gaze_yaw is not None
-                or l_gaze_pitch is not None
-                or r_gaze_yaw is not None
-                or r_gaze_pitch is not None
-            ):
-                lines.append(
-                    "gazeYawPitch L="
-                    f"{_fmt_num(l_gaze_yaw, 2)}/{_fmt_num(l_gaze_pitch, 2)} "
-                    "R="
-                    f"{_fmt_num(r_gaze_yaw, 2)}/{_fmt_num(r_gaze_pitch, 2)}"
-                )
-    else:
-        lines.append("event: none")
-        lines.append(f"landmarks={len(landmarks)}")
-
-    if len(landmarks) > 473:
-        lxy = _safe_lm_xy(landmarks[468])
-        rxy = _safe_lm_xy(landmarks[473])
-        if lxy and rxy:
-            lines.append(
-                "iris L(x,y)="
-                f"{_fmt_num(lxy[0], 4)},{_fmt_num(lxy[1], 4)} "
-                "R(x,y)="
-                f"{_fmt_num(rxy[0], 4)},{_fmt_num(rxy[1], 4)}"
-            )
-
     return lines
 
 
@@ -255,80 +209,6 @@ def _draw_info_panel(img, lines: List[str]) -> None:
         ty = y0 + pad + (i + 1) * line_h - 4
         cv2.putText(img, line, (tx + 1, ty + 1), font, scale, (0, 0, 0), 2, cv2.LINE_AA)
         cv2.putText(img, line, (tx, ty), font, scale, HUD_TEXT, thickness, cv2.LINE_AA)
-
-
-def _draw_face_direction_from_ypr(
-    img,
-    origin: Tuple[int, int],
-    yaw_deg: Any,
-    pitch_deg: Any,
-    roll_deg: Any,
-) -> None:
-    """Draw face forward vector from yaw/pitch/roll at given origin.
-
-    Coordinate System Convention:
-    - Yaw: Positive values indicate turning RIGHT, negative values indicate turning LEFT
-    - Pitch: Positive values indicate tilting UP, negative values indicate tilting DOWN
-    - Roll: Positive values indicate rotating counter-clockwise (tipping left)
-
-    The displayed arrow shows the direction the face is looking, with:
-    - Cyan arrow for face direction vector
-    - Orange tick mark for roll indication
-    """
-    yaw = safe_float(yaw_deg, float("nan"))
-    pitch = safe_float(pitch_deg, float("nan"))
-    roll = safe_float(roll_deg, float("nan"))
-    if not (math.isfinite(yaw) and math.isfinite(pitch)):
-        return
-
-    yaw_r = math.radians(yaw)
-    pitch_r = math.radians(pitch)
-
-    # Reconstruct normalized face-forward direction from yaw/pitch conventions.
-    # Right-positive yaw: fx = sin(yaw) (positive x when looking right)
-    # Up-positive pitch: fy = -sin(pitch) (negative y in image coords when looking up)
-    fx = math.sin(yaw_r)
-    fy = -math.sin(pitch_r)
-    fz = -math.cos(yaw_r) * math.cos(pitch_r)
-    mag = math.sqrt(fx * fx + fy * fy + fz * fz)
-    if mag <= 1e-9:
-        return
-    fx /= mag
-    fy /= mag
-
-    h, w = img.shape[:2]
-    length = int(max(36, min(w, h) * 0.16))
-    ox, oy = int(origin[0]), int(origin[1])
-    dx = fx * float(length)
-    dy = fy * float(length)
-    raw_len = math.hypot(dx, dy)
-    min_vis = max(14.0, float(length) * 0.3)
-    if raw_len > 1e-6 and raw_len < min_vis:
-        s = min_vis / raw_len
-        dx *= s
-        dy *= s
-    ex = int(round(ox + dx))
-    ey = int(round(oy + dy))
-
-    cv2.arrowedLine(img, (ox, oy), (ex, ey), WHITE, 4, cv2.LINE_AA, tipLength=0.22)
-    cv2.arrowedLine(img, (ox, oy), (ex, ey), CYAN, 2, cv2.LINE_AA, tipLength=0.22)
-
-    # Roll rotates around the forward axis; show it as a short nose-centered tick.
-    if math.isfinite(roll):
-        rr = math.radians(roll)
-        tx = math.cos(rr)
-        ty = -math.sin(rr)
-        tick_len = max(10, int(length * 0.25))
-        p1 = (
-            int(round(ox - tx * tick_len * 0.5)),
-            int(round(oy - ty * tick_len * 0.5)),
-        )
-        p2 = (
-            int(round(ox + tx * tick_len * 0.5)),
-            int(round(oy + ty * tick_len * 0.5)),
-        )
-        cv2.line(img, p1, p2, WHITE, 3, cv2.LINE_AA)
-        cv2.line(img, p1, p2, ORANGE, 1, cv2.LINE_AA)
 
 
 def render_camera_capture_marked(
@@ -554,8 +434,8 @@ def save_capture(
     h: float,
     click_pos: Tuple[float, float],
     frame: Any,
-    evt: Any,
-    runtime_evt: Optional[Dict[str, Any]] = None,
+    evt: Optional[FaceMeshEvent],
+    calibrated_event: Optional[CalibratedFaceAndGazeEvent] = None,
 ) -> None:
     """Save a capture payload that supports offline calibration diagnostics."""
     CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
@@ -566,44 +446,20 @@ def save_capture(
     base = f"mesh_capture_{ts}"
     png_path = CAPTURE_DIR / f"{base}.png"
     raw_png_path = CAPTURE_DIR / f"{base}_raw.png"
-    eye_debug_dir = CAPTURE_DIR / f"{base}_eye_debug"
     json_path = CAPTURE_DIR / f"{base}.json"
 
-    snap_evt = evt
-    snap_frame = frame
     snap_landmarks = list(evt.landmarks) if evt and evt.landmarks else None
-    snap = {"evt": snap_evt, "frame": snap_frame, "landmarks": snap_landmarks}
-
-    if isinstance(snap_evt, FaceMeshEvent):
-        event_dump = snap_evt.to_capture_dump()
-        mesh_data = event_dump.get("meshData") or {}
-    elif isinstance(snap_evt, dict):
-        event_dump = snap_evt
-        eyes = snap_evt.get("eyes")
-        mesh_data = {
-            "landmarks": snap_evt.get("landmarks"),
-            "blendshapes": snap_evt.get("blendshapes"),
-            "transformMatrix": snap_evt.get("transformMatrix"),
-            "faceMaskSegment": snap_evt.get("faceMaskSegment"),
-            "eyes": eyes,
-        }
-    else:
-        event_dump = None
-        mesh_data = {
-            "landmarks": None,
-            "blendshapes": None,
-            "transformMatrix": None,
-            "faceMaskSegment": None,
-            "eyes": None,
-        }
+    snap = {"evt": evt, "frame": frame, "landmarks": snap_landmarks}
+    event_dump = evt.to_capture_dump() if evt is not None else None
+    mesh_data = event_dump.get("meshData") if event_dump else None
 
     shot_ok, shot_err = render_camera_capture_marked(
         str(png_path), snap, overlay_w=w, overlay_h=h, click_pos=(click_x, click_y)
     )
     raw_ok = False
     raw_err: Optional[str] = None
-    if snap_frame is not None:
-        mirrored_raw = cv2.flip(snap_frame, 1)
+    if frame is not None:
+        mirrored_raw = cv2.flip(frame, 1)
         raw_ok = bool(cv2.imwrite(str(raw_png_path), mirrored_raw))
         if not raw_ok:
             raw_err = "cv2.imwrite failed"
@@ -619,75 +475,8 @@ def save_capture(
             "yScreen": float(display["y"]) + click_y,
         },
         "faceMeshEvent": event_dump,
-        "runtimeEvent": runtime_evt,
-        "calibratedGaze": (
-            {
-                "faceDeltaYaw": runtime_evt.get("face_delta_yaw"),
-                "faceDeltaPitch": runtime_evt.get("face_delta_pitch"),
-                "correctedEyeYaw": runtime_evt.get("corrected_eye_yaw"),
-                "correctedEyePitch": runtime_evt.get("corrected_eye_pitch"),
-                "correctedYaw": runtime_evt.get("corrected_yaw"),
-                "correctedPitch": runtime_evt.get("corrected_pitch"),
-                "correctedYawLinear": runtime_evt.get("corrected_yaw_linear"),
-                "correctedPitchLinear": runtime_evt.get("corrected_pitch_linear"),
-                "correctedScreenX": runtime_evt.get("corrected_screen_x"),
-                "correctedScreenY": runtime_evt.get("corrected_screen_y"),
-                "overlayX": runtime_evt.get("overlay_x"),
-                "overlayY": runtime_evt.get("overlay_y"),
-            }
-            if isinstance(runtime_evt, dict)
-            else None
-        ),
-        "calibrationModel": (
-            {
-                "centerEyeYaw": runtime_evt.get("center_eye_yaw"),
-                "centerEyePitch": runtime_evt.get("center_eye_pitch"),
-                "faceCenterYaw": runtime_evt.get("face_center_yaw"),
-                "faceCenterPitch": runtime_evt.get("face_center_pitch"),
-                "faceCenterX": runtime_evt.get("face_center_x"),
-                "faceCenterY": runtime_evt.get("face_center_y"),
-                "faceCenterZ": runtime_evt.get("face_center_z"),
-                "centerZeta": runtime_evt.get("center_zeta"),
-                "yawCoefficientPositive": runtime_evt.get("yaw_coefficient_positive"),
-                "yawCoefficientNegative": runtime_evt.get("yaw_coefficient_negative"),
-                "pitchCoefficientPositive": runtime_evt.get(
-                    "pitch_coefficient_positive"
-                ),
-                "pitchCoefficientNegative": runtime_evt.get(
-                    "pitch_coefficient_negative"
-                ),
-                "yawFromPitchCoupling": runtime_evt.get("yaw_from_pitch_coupling"),
-                "pitchFromYawCoupling": runtime_evt.get("pitch_from_yaw_coupling"),
-                "eyeYawMin": runtime_evt.get("eye_yaw_min"),
-                "eyeYawMax": runtime_evt.get("eye_yaw_max"),
-                "eyePitchMin": runtime_evt.get("eye_pitch_min"),
-                "eyePitchMax": runtime_evt.get("eye_pitch_max"),
-                "screenCenterCamX": runtime_evt.get("screen_center_cam_x"),
-                "screenCenterCamY": runtime_evt.get("screen_center_cam_y"),
-                "screenCenterCamZ": runtime_evt.get("screen_center_cam_z"),
-                "screenAxisXX": runtime_evt.get("screen_axis_x_x"),
-                "screenAxisXY": runtime_evt.get("screen_axis_x_y"),
-                "screenAxisXZ": runtime_evt.get("screen_axis_x_z"),
-                "screenAxisYX": runtime_evt.get("screen_axis_y_x"),
-                "screenAxisYY": runtime_evt.get("screen_axis_y_y"),
-                "screenAxisYZ": runtime_evt.get("screen_axis_y_z"),
-                "screenScaleX": runtime_evt.get("screen_scale_x"),
-                "screenScaleY": runtime_evt.get("screen_scale_y"),
-                "screenFitRmse": runtime_evt.get("screen_fit_rmse"),
-            }
-            if isinstance(runtime_evt, dict)
-            else None
-        ),
-        "displayGeometry": (
-            {
-                "originX": runtime_evt.get("origin_x"),
-                "originY": runtime_evt.get("origin_y"),
-                "width": runtime_evt.get("display_width"),
-                "height": runtime_evt.get("display_height"),
-            }
-            if isinstance(runtime_evt, dict)
-            else None
-        ),
+        "calibrated": calibrated_event.to_dict() if calibrated_event else None,
+        "display": display,
         "meshData": mesh_data,
         "screenshot": {
             "path": str(png_path),

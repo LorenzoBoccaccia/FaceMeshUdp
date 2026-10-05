@@ -2,110 +2,90 @@
 
 ## Goal
 
-Turn a sequence of per-frame face-mesh events into pixel-space gaze estimates. To do that we need:
+Turn per-frame face-mesh measurements into the point on screen the user looks at, and into
+gaze angles for games. One 9-point session provides everything except the viewing
+distance, which the user measures once (`--viewing-distance`, default 100 cm).
 
-1. A 3D model of the monitor (pose, orientation, physical size) expressed in the camera reference frame.
-2. A per-user mapping from raw eye-socket angles to true eye-in-head angles.
+## Measurements and frames
 
-Both fall out of a single 9-point calibration session.
-
-## Reference frames
-
-- **Camera frame** is the frame the face mesh reports in: origin at the camera optical centre, `+x` right, `+y` down, `+z` forward (away from the camera along its optical axis). Head position `h = (hx, hy, hz)` and head pose `(yaw, pitch)` are expressed in this frame.
-- **Screen frame** is an affine 2D frame embedded in a plane in camera space. Origin is at the centre of the screen; axes `ax`, `ay` lie in the screen plane; a pixel `(p_x, p_y)` maps to the 3D point `P = c + (p_x - o_x) · A + (p_y - o_y) · B`, where `A`, `B` have units of **mm per pixel** along the two in-plane directions. `(o_x, o_y)` is the pixel location of the origin (the centre dot).
-
-`A = (1/scale_x) · ax` and `B = (1/scale_y) · ay` — the stored `screen_scale_*` fields are in pixels per mm.
-
-## What we know and what we must recover
-
-| quantity | source | type |
-| --- | --- | --- |
-| head position `h_i` per sample | face mesh | reliable |
-| head pose `(yaw_i, pitch_i)` → forward ray `d_i` | face mesh | reliable |
-| raw eye angles `(e_yaw_i, e_pitch_i)` | face mesh | biased / per-user scaled |
-| target pixel `(p_x_i, p_y_i)` on screen | UX — we chose it | exact |
-| monitor position / orientation / scale | unknown | solve for it |
-| eye-socket → true-eye-angle mapping | unknown | solve for it |
-
-Previously the code pulled physical monitor size from the OS (`GetDeviceCaps HORZSIZE/VERTSIZE`) and assumed the screen plane was `z = 0` with world-aligned axes. Both assumptions are now dropped.
+- **Camera frame**: MediaPipe's metric camera space. `+x` image right, `+y` up, `+z` toward
+  the viewer (the camera looks along `−z`), millimetres.
+- **Head rotation `R`**: top-left 3×3 of MediaPipe's facial transformation matrix. It maps
+  the face's own axes (x to the face's left, y up, z out of the face) into the camera frame.
+- **Person axes**: right / up / back as seen by the person, `PERSON_AXES = diag(−1, 1, −1)`
+  applied to face or camera axes. All yaw/pitch angles in the code are Fick angles in these
+  axes: yaw to the right, then pitch up, `direction(yaw, pitch) = (sin y·cos p, sin p, −cos y·cos p)`.
+- **Eye position `e`**: midpoint of the four eye corners, unprojected with MediaPipe's camera
+  model (63° vertical field of view) at the head's reported depth. Lateral position is metric
+  whatever the real camera's field of view is; absolute depth is not, and nothing relies on it.
+- **Raw eye reading `r`**: iris offset from the eye corners and nose bridge, measured on the
+  face's own axes (landmarks de-rotated by `Rᵀ`), averaged over both eyes. Head rotation does
+  not leak into it.
 
 ## Nine-point procedure
 
-Nine target pairs are shown in sequence: `C, T, TL, L, BL, B, BR, R, TR`. Each target has two on-screen dots:
+Each target shows a red dot (where the nose aims) and a green dot (where the eyes look),
+mirrored through the screen centre. At `C` both coincide at the centre and the user faces it
+with head and eyes aligned. Click, hold still through the blink, and the capture window
+records the frames. A target whose capture window saw no usable face is asked again.
 
-- **Red dot** (`nose_target`) — where the user should *aim the nose* (head forward ray).
-- **Green dot** (`eye_target`) — where the user should *look* with the eyes. Always placed at the point opposite the red dot through the screen centre: `eye_target = 2·C − nose_target`.
+Each `CalibrationPoint` keeps the per-axis median raw eye reading, the median eye position
+and the chordal mean head rotation of its frames.
 
-`C` is the degenerate case where both dots coincide at the screen centre: head forward and gaze aligned on the centre.
+## Model
 
-### UX flow per target
+Everything is expressed relative to the reference pose at `C`:
 
-1. Render red + green dots at the pre-computed pixel positions.
-2. Wait for a mouse click. The click is interpreted as *"my nose is on the red dot now"*. No pose-based alignment check — we trust the user. This is the critical inversion: UX no longer guides the head to an assumed position, the head tells us where the dots actually are.
-3. **Blink phase** (≈500 ms): dots blink white as acknowledgement. Lets the user settle.
-4. **Capture phase** (≈500 ms): record head pose, head position, and raw eye angles each frame, then average.
-5. Advance to the next target.
+- `S0 = R_C · PERSON_AXES` is the reference person frame; the screen centre lies straight
+  ahead of `e_C` at the viewing distance `D`.
+- The screen's axes are the reference axes rotated by a **roll** about the line of sight and
+  a **tilt** about the screen's horizontal axis (eyes above or below the centre, monitor tilt).
+  Pixel offsets map to millimetres with the OS-reported pixel density.
+- Eye rotation within the head: `eye = W · (r − r_C)`, a full 2×2 matrix (gains and
+  cross-talk), zero at `C` by the protocol.
+- Gaze direction: `R · PERSON_AXES · direction(eye)`, a rotation composition, so head roll
+  and large head/eye combinations are handled exactly.
+- Head aim: the head turns only part of the way to the red dot,
+  `head angles = G · (angles to the red dot)` per axis.
 
-The result of the session is nine `CalibrationPoint` records, each carrying `head_x/y/z`, `head_yaw/pitch`, `raw_eye_yaw/pitch`, and the pixel targets.
+Because head rotations are taken relative to `R_C`, a constant bias in MediaPipe's head
+orientation cancels.
 
-## Screen geometry fit
+## Fit
 
-### Per-point constraint
+`fit_gaze_model` minimises, over the 8 non-centre targets:
 
-For point `i`, the head-forward ray from `h_i` along direction `d_i` must hit the 3D point that corresponds to the red-dot pixel:
+- eye residual: `W · (r_i − r_C)` minus the eye-in-head angles that point from `e_i` at the
+  green dot, given head rotation `R_C⁻¹ R_i`;
+- head residual: the head's forward angles minus `G ×` the angles from `e_i` to the red dot,
 
-    h_i + t_i · d_i = c + u_i · A + v_i · B
+for roll, tilt, `W` (4) and `G` (2), with a robust loss. The anti-correlated head and eye
+targets make head and eye rotations vary independently, and head rotation is measured in
+true degrees, which ties the eye gains to the head.
 
-with `u_i = p_x_i − o_x`, `v_i = p_y_i − o_y`, and `t_i > 0` the per-point ray length. This is three scalar equations in the unknowns `(c, A, B, t_i)`.
+The viewing distance is an input, not a fitted parameter: with only these targets a larger
+distance can be traded for a smaller head-aim gain and eye gain, so the data cannot pin it.
+A wrong distance scales the eye contribution relative to the head (10% off gives about 5%).
 
-### Joint linear fit
+The profile file stores the measured points, the screen and the distance; the model is
+refitted at every start, so `--viewing-distance` can be corrected without recalibrating.
 
-The system is **linear** in `(c, A, B, t_1, …, t_9)` — 18 unknowns. Nine points give 27 equations. Stack them into `M x = b` and solve with `numpy.linalg.lstsq`. Monitor pose and scale come out directly:
+## Runtime
 
-- `c` — screen centre in camera mm.
-- `axis_x = A / ‖A‖`, `scale_x = 1 / ‖A‖` (pixels per mm along column direction).
-- `axis_y_ortho = B − (B·axis_x)·axis_x`, `axis_y = axis_y_ortho / ‖axis_y_ortho‖`, `scale_y = 1 / ‖axis_y_ortho‖`.
-- `normal = axis_x × axis_y`.
+For each frame, `GazeModel.project` builds the gaze ray from the eye position, intersects
+it with the screen plane, and reports:
 
-Orthogonalisation pushes residual into one axis, matching the convention that `apply_calibration_model` already enforces at runtime.
-
-### Conditioning
-
-Eight effective degrees of freedom (`c` has 3, orientation has 3, scale has 2) are observed by 18 constraints. The plane normal is identifiable only if the nine head-ray origins span a nontrivial volume — i.e. the user's head must shift in `x`/`y` across targets. Pointing the nose at the four corner dots naturally induces 5–10 cm of head translation at a 60 cm viewing distance, which is enough parallax.
-
-If the user keeps the head unnaturally still, the fit degenerates: the normal is unobserved. We accept that and report `screen_fit_rmse` so downstream code can see when the fit is weak.
-
-## Eye calibration
-
-Once screen geometry is known, each point's *target eye angle* is computable:
-
-1. Green-dot pixel `(ex_i, ey_i) = 2·C − nose_target_i` lies at `Q_i = c + (ex_i − o_x)·A + (ey_i − o_y)·B` in camera frame.
-2. True gaze direction from head `Q_i − h_i` → yaw/pitch via `screen_xy_to_head_angles`.
-3. Target eye angle = true gaze angle − head angle at that frame.
-
-Compare to the measured raw eye delta `raw_eye − raw_eye_C`:
-
-- Ratio `target_eye_yaw_i / raw_eye_delta_yaw_i` bucketed by sign of the delta → `yaw_coefficient_positive` / `yaw_coefficient_negative` (same for pitch). Sign-bucketed because the eye-in-socket signal is asymmetric.
-- Cross-axis coupling (`yaw_from_pitch_coupling`, `pitch_from_yaw_coupling`) fit linearly on the residual after the diagonal coefficients are applied.
-- The coefficient applied at runtime interpolates between `negative` and `positive` as a function of the eye delta's position in `[eye_*_min, eye_*_max]`.
-
-Because the head-forward ray and the eye target are on opposite sides of the screen centre, the eye delta for each outer point has a reliably large magnitude — good signal-to-noise for the ratio.
-
-## Application at runtime
-
-`apply_calibration_model` takes a runtime face-mesh event and returns pixel-space gaze:
-
-1. Subtract calibration centre from raw eye angles to get `eye_delta`.
-2. Apply interpolated coefficients + coupling → `corrected_eye_yaw/pitch`.
-3. Add to head angles → `absolute_gaze_yaw/pitch`.
-4. Trace the ray from `h` along that direction and intersect the calibrated screen plane via `project_head_angles_to_screen_xy`.
-5. Decompose the intersection in `(axis_x, axis_y)` and scale by `(scale_x, scale_y)` → pixel offset from origin.
-
-All of the intersection maths lives in `gaze_primitives.py`; calibration only has to supply `(c, axis_x, axis_y, scale_x, scale_y)`.
+- `screen_px`: the gaze point in pixels, plus where the head alone (`head_screen_px`) and the
+  eyes alone from the reference pose (`eye_screen_px`) point, for the overlays;
+- `yaw`, `pitch`: the gaze point's offset from the screen centre as angles at the viewing
+  distance. They are zero at the centre and do not change when the head moves while the
+  eyes stay on the same point; this is what opentrack and FreeTrack receive.
 
 ## Failure modes to watch
 
-- **User clicks before settling** — head pose still moving, captured angles noisy. Mitigated by the 500 ms blink before capture.
-- **User moves the mouse to click** — clicking requires head/eye drift. The blink phase lets things settle again before sampling.
-- **User keeps head too still** — plane normal unobserved. Report `screen_fit_rmse` and let the caller decide.
-- **User clicks with nose *not* on the red dot** — garbage in, garbage out. There is no automated check for this; the whole approach trusts the click.
+- **Head not aligned with the eyes at `C`**: the reference pose defines the screen axes; a
+  wrong `C` biases everything.
+- **Wrong viewing distance**: eye and head contributions stop matching; measure it.
+- **Clicking before settling**: the blink phase and the median per target reduce the effect.
+- **Display without a physical size**: calibration refuses to run, since targets cannot be
+  placed in millimetres.

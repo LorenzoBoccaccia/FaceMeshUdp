@@ -43,6 +43,9 @@ OPENTRACK_MODULES_DIR = "modules"
 OPENTRACK_GAME_LIST = Path("doc", "settings", "facetracknoir supported games.csv")
 OPENTRACK_RELEASES_URL = "https://github.com/opentrack/opentrack/releases"
 
+MAX_VIEW_YAW_DEG = 180.0
+MAX_VIEW_PITCH_DEG = 90.0
+
 MUTEX_TIMEOUT_MS = 16
 WAIT_OBJECT_0 = 0x00000000
 WAIT_ABANDONED = 0x00000080
@@ -296,14 +299,16 @@ def _set_registry_path(key_path: str, location: str) -> None:
 class FreeTrackForwardStep:
     """Final pipeline step: Publish the calibrated gaze to games over the FreeTrack 2.0 Enhanced interface.
 
-    Games see the same view rotation opentrack's freetrack protocol would give them for
-    the pose the OpenTrack step forwards, so opentrack has to be installed but not running.
+    Games see the view rotation opentrack's freetrack protocol would give them for the
+    pose the OpenTrack step forwards, scaled by the output multiplier so a small gaze shift
+    can turn the game view further. opentrack has to be installed but not running.
     """
 
     def __init__(
         self,
         opentrack_dir: Path,
         interface: str = INTERFACE_BOTH,
+        multiplier: float = 1.0,
         enabled: bool = False,
     ):
         """Initialize FreeTrack forward step.
@@ -311,6 +316,7 @@ class FreeTrackForwardStep:
         Args:
             opentrack_dir: opentrack installation whose client libraries games load
             interface: Client interface games may use: "both", "freetrack" or "npclient"
+            multiplier: Game view angle per degree of gaze, positive (default: 1)
             enabled: Whether FreeTrack publishing is active (default: False)
 
         Raises:
@@ -318,7 +324,10 @@ class FreeTrackForwardStep:
         """
         if interface not in INTERFACES:
             raise ValueError(f"Unknown FreeTrack interface '{interface}'")
+        if multiplier <= 0:
+            raise ValueError(f"FreeTrack multiplier must be positive, got {multiplier}")
         self.interface = interface
+        self.multiplier = multiplier
         self.opentrack_dir = opentrack_dir
         self.enabled = False
         self._mutex = None
@@ -333,7 +342,8 @@ class FreeTrackForwardStep:
 
         logger.debug(
             f"FreeTrackForwardStep initialized: interface={interface}, "
-            f"opentrack_dir={self.opentrack_dir}, enabled={self.enabled}"
+            f"multiplier={multiplier}, opentrack_dir={self.opentrack_dir}, "
+            f"enabled={self.enabled}"
         )
 
     @property
@@ -409,7 +419,8 @@ class FreeTrackForwardStep:
             self._start_trackir_dummy()
 
         logger.info(
-            f"FreeTrack 2.0 Enhanced output active (interface: {self.interface})"
+            f"FreeTrack 2.0 Enhanced output active (interface: {self.interface}, "
+            f"multiplier: {self.multiplier:g})"
         )
 
     def _register_client_libraries(self) -> None:
@@ -504,6 +515,10 @@ class FreeTrackForwardStep:
                 f"FreeTrack: game connected: {name or 'unknown game'} (id {game_id})"
             )
 
+    def _view_angle(self, gaze_deg: float, limit_deg: float) -> float:
+        """Game view angle for a gaze angle, kept within the range games accept."""
+        return max(-limit_deg, min(limit_deg, gaze_deg * self.multiplier))
+
     def receive_frame(
         self,
         frame: np.ndarray,
@@ -522,8 +537,8 @@ class FreeTrackForwardStep:
         if not self.enabled or gaze is None:
             return
 
-        yaw = -math.radians(gaze.yaw)
-        pitch = -math.radians(gaze.pitch)
+        yaw = -math.radians(self._view_angle(gaze.yaw, MAX_VIEW_YAW_DEG))
+        pitch = -math.radians(self._view_angle(gaze.pitch, MAX_VIEW_PITCH_DEG))
 
         if not self._acquire():
             logger.debug("FreeTrack: shared memory busy, skipping frame")

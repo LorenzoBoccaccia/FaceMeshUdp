@@ -565,6 +565,7 @@ class FrameDispatcher:
         ewma_proc_ms: Optional[float] = None
         ewma_alpha = 0.1
         frames_since_log = 0
+        last_jump_count = 0
 
         try:
             if overlay_enabled:
@@ -634,6 +635,16 @@ class FrameDispatcher:
                         )
                         last_log_time = now
                         frames_since_log = 0
+                        if (
+                            self.gaze_smoothing_step is not None
+                            and self.gaze_smoothing_step.reset_window_ms is not None
+                        ):
+                            jump_count = self.gaze_smoothing_step.jump_count
+                            logger.info(
+                                f"Gaze jumps: {jump_count - last_jump_count} "
+                                f"in {elapsed:.1f}s"
+                            )
+                            last_jump_count = jump_count
                         if evt is not None and evt.has_face:
                             logger.info(
                                 f"Face detected - landmarks: {evt.landmark_count} "

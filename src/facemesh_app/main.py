@@ -89,15 +89,16 @@ def parse_args():
         type=int,
         default=None,
         metavar="MS",
-        help="After a gaze jump, average over only the last MS milliseconds, "
-        "growing back to --smooth while the gaze holds (default: off)",
+        help="When the gaze jumps to a new fixation, keep only the last MS milliseconds "
+        "of the previous one in the average (default: off)",
     )
     parser.add_argument(
         "--smooth-threshold",
         type=float,
-        default=3.0,
+        default=1.0,
         metavar="DEG",
-        help="Gaze movement in degrees that counts as a jump for --smooth-reset (default: 3)",
+        help="Distance from the current fixation, just above fixation jitter, that counts "
+        "as a jump for --smooth-reset (default: 1)",
     )
     parser.add_argument("--quiet", action="store_true", help="Suppress output")
     parser.add_argument(
@@ -174,8 +175,8 @@ def parse_args():
     args = parser.parse_args()
     if args.smooth < 0:
         parser.error("--smooth must be 0 or a positive number of milliseconds")
-    if args.smooth_reset is not None and not 0 < args.smooth_reset < args.smooth:
-        parser.error("--smooth-reset must be positive and shorter than --smooth")
+    if args.smooth_reset is not None and not 0 <= args.smooth_reset < args.smooth:
+        parser.error("--smooth-reset must be at least 0 and shorter than --smooth")
     if args.smooth_threshold <= 0:
         parser.error("--smooth-threshold must be a positive number of degrees")
     if args.freetrack and sys.platform != "win32":
@@ -370,8 +371,8 @@ def main():
         logger.info(f"Gaze smoothing window: {args.smooth} ms")
     else:
         logger.info(
-            f"Gaze smoothing window: {args.smooth} ms, {args.smooth_reset} ms after "
-            f"jumps over {args.smooth_threshold:g} deg"
+            f"Gaze smoothing window: {args.smooth} ms, {args.smooth_reset} ms tail kept "
+            f"on jumps beyond {args.smooth_threshold:g} deg"
         )
 
     opentrack_forward_step = OpenTrackForwardStep(

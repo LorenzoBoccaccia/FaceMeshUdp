@@ -661,8 +661,9 @@ class GazeDirection:
 class GazeSmoothingStep:
     """Pipeline step: Steady the calibrated gaze by averaging it over a trailing time window.
 
-    Right after a confirmed gaze jump the window is shortened, so the view follows a new
-    fixation quickly, and then grows back to full length while the fixation holds.
+    Movement within the threshold is treated as fixation jitter and averaged away. When the
+    gaze leaves the current fixation for good, only a short tail of the previous fixation is
+    kept, so the view moves to the new fixation promptly while still easing into it.
     The output depends only on the samples inside the window, so a held gaze always settles
     on its calibrated absolute direction no matter how fast or slow it got there.
     """
@@ -671,62 +672,89 @@ class GazeSmoothingStep:
         self,
         window_ms: int = 0,
         reset_window_ms: Optional[int] = None,
-        reset_threshold_deg: float = 3.0,
+        reset_threshold_deg: float = 1.0,
     ):
         """Initialize gaze smoothing step.
 
         Args:
             window_ms: Length of the averaging window in milliseconds; 0 forwards the gaze raw
-            reset_window_ms: Window length right after a gaze jump; None keeps the window fixed
-            reset_threshold_deg: Gaze movement in degrees that counts as a jump
+            reset_window_ms: Tail of the previous fixation kept after a jump; None disables jumps
+            reset_threshold_deg: Distance from the current fixation beyond fixation jitter
         """
         self.window_ms = window_ms
         self.reset_window_ms = reset_window_ms
         self.reset_threshold_deg = reset_threshold_deg
+        self.jump_count = 0
         self._samples: Deque[Tuple[int, float, float]] = deque()
-        self._jump_ts: Optional[int] = None
-        self._jump_candidate: Optional[Tuple[float, float]] = None
+        self._fixation_ts = 0
+        self._candidate: Optional[Tuple[int, float, float]] = None
 
         logger.debug(
             f"GazeSmoothingStep initialized: window_ms={window_ms}, "
             f"reset_window_ms={reset_window_ms}, reset_threshold_deg={reset_threshold_deg}"
         )
 
-    def _window_length(self, ts: int) -> int:
-        if self._jump_ts is None:
-            return self.window_ms
-        length = self.reset_window_ms + (ts - self._jump_ts)
-        if length >= self.window_ms:
-            self._jump_ts = None
-            return self.window_ms
-        return length
-
     def _trim(self, ts: int) -> None:
-        horizon = ts - self._window_length(ts)
-        while self._samples and self._samples[0][0] <= horizon:
+        horizon = ts - self.window_ms
+        tail_start = (
+            self._fixation_ts - self.reset_window_ms
+            if self.reset_window_ms is not None
+            else horizon
+        )
+        while self._samples and (
+            self._samples[0][0] <= horizon or self._samples[0][0] < tail_start
+        ):
             self._samples.popleft()
 
-    def _mean(self) -> Tuple[float, float]:
-        count = len(self._samples)
+    @staticmethod
+    def _mean(samples) -> Tuple[float, float]:
+        count = len(samples)
         return (
-            sum(sample[1] for sample in self._samples) / count,
-            sum(sample[2] for sample in self._samples) / count,
+            sum(sample[1] for sample in samples) / count,
+            sum(sample[2] for sample in samples) / count,
         )
 
-    def _is_jump(self, yaw: float, pitch: float) -> bool:
-        mean_yaw, mean_pitch = self._mean()
-        if math.hypot(yaw - mean_yaw, pitch - mean_pitch) <= self.reset_threshold_deg:
-            self._jump_candidate = None
-            return False
-        confirmed = (
-            self._jump_candidate is not None
-            and math.hypot(
-                yaw - self._jump_candidate[0], pitch - self._jump_candidate[1]
-            )
-            <= self.reset_threshold_deg
-        )
-        self._jump_candidate = None if confirmed else (yaw, pitch)
-        return confirmed
+    def _drop_candidate(self) -> None:
+        if (
+            self._candidate is not None
+            and self._samples
+            and self._samples[-1] == self._candidate
+        ):
+            self._samples.pop()
+        self._candidate = None
+
+    def _start_fixation(self, sample: Tuple[int, float, float]) -> None:
+        self._samples.clear()
+        self._candidate = None
+        self._fixation_ts = sample[0]
+        self._samples.append(sample)
+
+    def _accept(self, sample: Tuple[int, float, float]) -> None:
+        fixation = [
+            entry
+            for entry in self._samples
+            if entry[0] >= self._fixation_ts and entry != self._candidate
+        ]
+        if not fixation:
+            self._start_fixation(sample)
+            return
+
+        _, yaw, pitch = sample
+        fixation_yaw, fixation_pitch = self._mean(fixation)
+        off_fixation = math.hypot(yaw - fixation_yaw, pitch - fixation_pitch)
+        candidate = self._candidate
+        if off_fixation <= self.reset_threshold_deg:
+            self._drop_candidate()
+        elif candidate is not None and math.hypot(
+            yaw - candidate[1], pitch - candidate[2]
+        ) < off_fixation:
+            self._fixation_ts = candidate[0]
+            self._candidate = None
+            self.jump_count += 1
+        else:
+            self._drop_candidate()
+            self._candidate = sample
+        self._samples.append(sample)
 
     def receive_frame(
         self,
@@ -745,6 +773,7 @@ class GazeSmoothingStep:
             Gaze averaged over the window, or None when the frame has no calibrated gaze
         """
         if calibrated_event is None:
+            self._drop_candidate()
             return None
 
         try:
@@ -752,22 +781,24 @@ class GazeSmoothingStep:
             pitch = float(calibrated_event.corrected_pitch)
         except (TypeError, ValueError) as e:
             logger.debug(f"Skipping frame without calibrated gaze: {e}")
+            self._drop_candidate()
             return None
 
         if self.window_ms <= 0:
             return GazeDirection(yaw=yaw, pitch=pitch)
 
         ts = calibrated_event.face_mesh_event.ts
+        sample = (ts, yaw, pitch)
         self._trim(ts)
         if not self._samples:
-            self._jump_ts = None
-            self._jump_candidate = None
-        elif self.reset_window_ms is not None and self._is_jump(yaw, pitch):
-            self._jump_ts = ts
-        self._samples.append((ts, yaw, pitch))
+            self._start_fixation(sample)
+        elif self.reset_window_ms is None:
+            self._samples.append(sample)
+        else:
+            self._accept(sample)
         self._trim(ts)
 
-        mean_yaw, mean_pitch = self._mean()
+        mean_yaw, mean_pitch = self._mean(self._samples)
         return GazeDirection(yaw=mean_yaw, pitch=mean_pitch)
 
 

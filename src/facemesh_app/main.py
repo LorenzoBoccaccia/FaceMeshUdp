@@ -84,6 +84,21 @@ def parse_args():
         metavar="MS",
         help="Average forwarded gaze over a trailing window of MS milliseconds (0: raw)",
     )
+    parser.add_argument(
+        "--smooth-reset",
+        type=int,
+        default=None,
+        metavar="MS",
+        help="After a gaze jump, average over only the last MS milliseconds, "
+        "growing back to --smooth while the gaze holds (default: off)",
+    )
+    parser.add_argument(
+        "--smooth-threshold",
+        type=float,
+        default=3.0,
+        metavar="DEG",
+        help="Gaze movement in degrees that counts as a jump for --smooth-reset (default: 3)",
+    )
     parser.add_argument("--quiet", action="store_true", help="Suppress output")
     parser.add_argument(
         "--log-interval", type=float, default=2.0, help="Log interval in seconds"
@@ -159,6 +174,10 @@ def parse_args():
     args = parser.parse_args()
     if args.smooth < 0:
         parser.error("--smooth must be 0 or a positive number of milliseconds")
+    if args.smooth_reset is not None and not 0 < args.smooth_reset < args.smooth:
+        parser.error("--smooth-reset must be positive and shorter than --smooth")
+    if args.smooth_threshold <= 0:
+        parser.error("--smooth-threshold must be a positive number of degrees")
     if args.freetrack and sys.platform != "win32":
         parser.error("--freetrack requires Windows")
     return args
@@ -340,12 +359,20 @@ def main():
 
     overlay_step = OverlayStep(enabled=False, show_hud=False)
 
-    gaze_smoothing_step = GazeSmoothingStep(window_ms=args.smooth)
-    logger.info(
-        f"Gaze smoothing window: {args.smooth} ms"
-        if args.smooth > 0
-        else "Gaze smoothing: off (raw)"
+    gaze_smoothing_step = GazeSmoothingStep(
+        window_ms=args.smooth,
+        reset_window_ms=args.smooth_reset,
+        reset_threshold_deg=args.smooth_threshold,
     )
+    if args.smooth <= 0:
+        logger.info("Gaze smoothing: off (raw)")
+    elif args.smooth_reset is None:
+        logger.info(f"Gaze smoothing window: {args.smooth} ms")
+    else:
+        logger.info(
+            f"Gaze smoothing window: {args.smooth} ms, {args.smooth_reset} ms after "
+            f"jumps over {args.smooth_threshold:g} deg"
+        )
 
     opentrack_forward_step = OpenTrackForwardStep(
         host=args.opentrack_host,

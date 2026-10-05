@@ -15,7 +15,7 @@ pip install -e ".[dev]"
 ## Calibrate and run
 
 `calibrate.bat` records the `default` profile into `calibration-default.json`, `start.bat`
-loads it and publishes to games over FreeTrack (TrackIR interface, 200 ms gaze smoothing). Both run from the repository root, use `.venv`, and pass any
+loads it and publishes to games over FreeTrack (TrackIR interface, 200 ms gaze smoothing, 50 ms right after a gaze jump). Both run from the repository root, use `.venv`, and pass any
 extra arguments through to the app (`start.bat --camera-index 1`).
 
 ```powershell
@@ -71,6 +71,8 @@ FreeTrack:
 Misc:
 
 - `--smooth MS` — average the forwarded gaze over the last MS milliseconds (default 0, raw)
+- `--smooth-reset MS` — after a gaze jump, average over only the last MS milliseconds, growing back to `--smooth` (default off)
+- `--smooth-threshold DEG` — gaze movement that counts as a jump for `--smooth-reset` (default 3)
 - `--overlay-fps FPS` — overlay redraw rate (default 60)
 - `--log-interval SECONDS` — periodic stats interval (default 2.0)
 - `--quiet` — suppress console output

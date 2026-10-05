@@ -4,6 +4,7 @@ Each step processes data and passes it to the next step in the pipeline.
 """
 
 import logging
+import math
 import socket
 import struct
 from collections import deque
@@ -660,20 +661,72 @@ class GazeDirection:
 class GazeSmoothingStep:
     """Pipeline step: Steady the calibrated gaze by averaging it over a trailing time window.
 
+    Right after a confirmed gaze jump the window is shortened, so the view follows a new
+    fixation quickly, and then grows back to full length while the fixation holds.
     The output depends only on the samples inside the window, so a held gaze always settles
     on its calibrated absolute direction no matter how fast or slow it got there.
     """
 
-    def __init__(self, window_ms: int = 0):
+    def __init__(
+        self,
+        window_ms: int = 0,
+        reset_window_ms: Optional[int] = None,
+        reset_threshold_deg: float = 3.0,
+    ):
         """Initialize gaze smoothing step.
 
         Args:
             window_ms: Length of the averaging window in milliseconds; 0 forwards the gaze raw
+            reset_window_ms: Window length right after a gaze jump; None keeps the window fixed
+            reset_threshold_deg: Gaze movement in degrees that counts as a jump
         """
         self.window_ms = window_ms
+        self.reset_window_ms = reset_window_ms
+        self.reset_threshold_deg = reset_threshold_deg
         self._samples: Deque[Tuple[int, float, float]] = deque()
+        self._jump_ts: Optional[int] = None
+        self._jump_candidate: Optional[Tuple[float, float]] = None
 
-        logger.debug(f"GazeSmoothingStep initialized: window_ms={window_ms}")
+        logger.debug(
+            f"GazeSmoothingStep initialized: window_ms={window_ms}, "
+            f"reset_window_ms={reset_window_ms}, reset_threshold_deg={reset_threshold_deg}"
+        )
+
+    def _window_length(self, ts: int) -> int:
+        if self._jump_ts is None:
+            return self.window_ms
+        length = self.reset_window_ms + (ts - self._jump_ts)
+        if length >= self.window_ms:
+            self._jump_ts = None
+            return self.window_ms
+        return length
+
+    def _trim(self, ts: int) -> None:
+        horizon = ts - self._window_length(ts)
+        while self._samples and self._samples[0][0] <= horizon:
+            self._samples.popleft()
+
+    def _mean(self) -> Tuple[float, float]:
+        count = len(self._samples)
+        return (
+            sum(sample[1] for sample in self._samples) / count,
+            sum(sample[2] for sample in self._samples) / count,
+        )
+
+    def _is_jump(self, yaw: float, pitch: float) -> bool:
+        mean_yaw, mean_pitch = self._mean()
+        if math.hypot(yaw - mean_yaw, pitch - mean_pitch) <= self.reset_threshold_deg:
+            self._jump_candidate = None
+            return False
+        confirmed = (
+            self._jump_candidate is not None
+            and math.hypot(
+                yaw - self._jump_candidate[0], pitch - self._jump_candidate[1]
+            )
+            <= self.reset_threshold_deg
+        )
+        self._jump_candidate = None if confirmed else (yaw, pitch)
+        return confirmed
 
     def receive_frame(
         self,
@@ -705,16 +758,17 @@ class GazeSmoothingStep:
             return GazeDirection(yaw=yaw, pitch=pitch)
 
         ts = calibrated_event.face_mesh_event.ts
+        self._trim(ts)
+        if not self._samples:
+            self._jump_ts = None
+            self._jump_candidate = None
+        elif self.reset_window_ms is not None and self._is_jump(yaw, pitch):
+            self._jump_ts = ts
         self._samples.append((ts, yaw, pitch))
-        horizon = ts - self.window_ms
-        while self._samples[0][0] <= horizon:
-            self._samples.popleft()
+        self._trim(ts)
 
-        count = len(self._samples)
-        return GazeDirection(
-            yaw=sum(sample[1] for sample in self._samples) / count,
-            pitch=sum(sample[2] for sample in self._samples) / count,
-        )
+        mean_yaw, mean_pitch = self._mean()
+        return GazeDirection(yaw=mean_yaw, pitch=mean_pitch)
 
 
 class OpenTrackForwardStep:

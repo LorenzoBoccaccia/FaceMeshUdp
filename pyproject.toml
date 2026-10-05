@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "facemesh"
 version = "0.1.0"
-description = "Pure Python FaceMesh overlay + UDP app"
+description = "Pure Python FaceMesh overlay + OpenTrack/FreeTrack app"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

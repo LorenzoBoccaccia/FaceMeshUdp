@@ -8,6 +8,7 @@ import argparse
 import logging
 import os
 import sys
+from pathlib import Path
 
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
@@ -22,7 +23,8 @@ from facemesh_app.pipeline_steps import (
     CalibrationAdapterStep,
     CaptureStep,
     OverlayStep,
-    UDPForwardStep,
+    GazeSmoothingStep,
+    OpenTrackForwardStep,
 )
 from facemesh_app.state_machine import StateMachine
 
@@ -64,10 +66,39 @@ def parse_args():
         help="Show live camera+mesh content in capture window",
     )
     parser.add_argument(
-        "--udp",
+        "--opentrack",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Forward calibrated output via UDP",
+        help="Forward calibrated output to opentrack's UDP tracker input",
+    )
+    parser.add_argument(
+        "--freetrack",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Publish calibrated output to games over FreeTrack 2.0 Enhanced (Windows)",
+    )
+    parser.add_argument(
+        "--smooth",
+        type=int,
+        default=0,
+        metavar="MS",
+        help="Average forwarded gaze over a trailing window of MS milliseconds (0: raw)",
+    )
+    parser.add_argument(
+        "--smooth-reset",
+        type=int,
+        default=None,
+        metavar="MS",
+        help="When the gaze jumps to a new fixation, keep only the last MS milliseconds "
+        "of the previous one in the average (default: off)",
+    )
+    parser.add_argument(
+        "--smooth-threshold",
+        type=float,
+        default=1.0,
+        metavar="DEG",
+        help="Distance from the current fixation, just above fixation jitter, that counts "
+        "as a jump for --smooth-reset (default: 1)",
     )
     parser.add_argument("--quiet", action="store_true", help="Suppress output")
     parser.add_argument(
@@ -115,19 +146,42 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--udp-host",
+        "--opentrack-host",
         type=str,
-        default=os.getenv("UDP_HOST", "127.0.0.1"),
-        help="UDP forward target host",
+        default=os.getenv("OPENTRACK_HOST", "127.0.0.1"),
+        help="opentrack UDP tracker host",
     )
     parser.add_argument(
-        "--udp-port",
+        "--opentrack-port",
         type=int,
-        default=_env_int("UDP_PORT", "4242"),
-        help="UDP forward target port",
+        default=_env_int("OPENTRACK_PORT", "4242"),
+        help="opentrack UDP tracker port",
     )
 
-    return parser.parse_args()
+    parser.add_argument(
+        "--freetrack-interface",
+        choices=("both", "freetrack", "npclient"),
+        default="both",
+        help="Client interface exposed to games: FreeTrack, TrackIR (NPClient) or both",
+    )
+    parser.add_argument(
+        "--opentrack-dir",
+        type=Path,
+        default=os.getenv("OPENTRACK_DIR"),
+        help="opentrack installation providing the FreeTrack/NPClient client libraries "
+        "(default: auto-detected)",
+    )
+
+    args = parser.parse_args()
+    if args.smooth < 0:
+        parser.error("--smooth must be 0 or a positive number of milliseconds")
+    if args.smooth_reset is not None and not 0 <= args.smooth_reset < args.smooth:
+        parser.error("--smooth-reset must be at least 0 and shorter than --smooth")
+    if args.smooth_threshold <= 0:
+        parser.error("--smooth-threshold must be a positive number of degrees")
+    if args.freetrack and sys.platform != "win32":
+        parser.error("--freetrack requires Windows")
+    return args
 
 
 def main():
@@ -150,7 +204,8 @@ def main():
         args.overlay
         or args.capture
         or args.capture_live
-        or args.udp
+        or args.opentrack
+        or args.freetrack
         or args.calibrate
         or args.calibration
         or args.force_recalibrate
@@ -185,19 +240,19 @@ def main():
         else:
             logger.info("No existing calibration found. Running in uncalibrated mode.")
 
-    auto_transition_to_udp = False
+    auto_transition_to_opentrack = False
     if no_explicit_mode:
         if calibration is not None and calibration.sample_count > 0:
-            args.udp = True
+            args.opentrack = True
             logger.info(
-                "No mode specified; existing calibration found. Starting UDP forwarder."
+                "No mode specified; existing calibration found. Starting OpenTrack forwarder."
             )
         else:
             args.calibrate = True
-            auto_transition_to_udp = True
+            auto_transition_to_opentrack = True
             logger.info(
                 "No mode specified and no calibration on disk. "
-                "Running calibration, then UDP forwarder."
+                "Running calibration, then OpenTrack forwarder."
             )
 
     state_machine = StateMachine()
@@ -305,11 +360,36 @@ def main():
 
     overlay_step = OverlayStep(enabled=False, show_hud=False)
 
-    udp_forward_step = UDPForwardStep(
-        host=args.udp_host,
-        port=args.udp_port,
-        enabled=args.udp,
+    gaze_smoothing_step = GazeSmoothingStep(
+        window_ms=args.smooth,
+        reset_window_ms=args.smooth_reset,
+        reset_threshold_deg=args.smooth_threshold,
     )
+    if args.smooth <= 0:
+        logger.info("Gaze smoothing: off (raw)")
+    elif args.smooth_reset is None:
+        logger.info(f"Gaze smoothing window: {args.smooth} ms")
+    else:
+        logger.info(
+            f"Gaze smoothing window: {args.smooth} ms, {args.smooth_reset} ms tail kept "
+            f"on jumps beyond {args.smooth_threshold:g} deg"
+        )
+
+    opentrack_forward_step = OpenTrackForwardStep(
+        host=args.opentrack_host,
+        port=args.opentrack_port,
+        enabled=args.opentrack,
+    )
+
+    freetrack_forward_step = None
+    if args.freetrack:
+        from facemesh_app.freetrack import FreeTrackForwardStep
+
+        freetrack_forward_step = FreeTrackForwardStep(
+            interface=args.freetrack_interface,
+            opentrack_dir=args.opentrack_dir,
+            enabled=True,
+        )
 
     frame_dispatcher = FrameDispatcher(
         args,
@@ -320,7 +400,9 @@ def main():
         calibration_adapter_step=calibration_adapter_step,
         capture_step=capture_step,
         overlay_step=overlay_step,
-        udp_forward_step=udp_forward_step,
+        gaze_smoothing_step=gaze_smoothing_step,
+        opentrack_forward_step=opentrack_forward_step,
+        freetrack_forward_step=freetrack_forward_step,
     )
     camera_reader = CameraReader(camera_id=args.camera_index)
 
@@ -332,17 +414,17 @@ def main():
             frame_dispatcher.start_calibration()
             logger.info("Running calibration workflow...")
             calib_matrix, _ = frame_dispatcher.run_calibration_workflow(camera_reader)
-            if auto_transition_to_udp:
+            if auto_transition_to_opentrack:
                 if calib_matrix is None:
                     logger.info(
-                        "Calibration did not complete; UDP forwarder will not start."
+                        "Calibration did not complete; OpenTrack forwarder will not start."
                     )
                 else:
                     logger.info(
-                        "Calibration complete. Starting UDP forwarder on "
-                        f"{args.udp_host}:{args.udp_port}."
+                        "Calibration complete. Starting OpenTrack forwarder on "
+                        f"{args.opentrack_host}:{args.opentrack_port}."
                     )
-                    frame_dispatcher.set_udp_forwarding_enabled(True)
+                    frame_dispatcher.set_opentrack_forwarding_enabled(True)
                     frame_dispatcher.run_capture_loop(camera_reader)
         else:
             frame_dispatcher.start_operational()
@@ -351,8 +433,10 @@ def main():
                 active_modes.append("capture")
             if args.overlay:
                 active_modes.append("overlay")
-            if args.udp:
-                active_modes.append("udp")
+            if args.opentrack:
+                active_modes.append("opentrack")
+            if args.freetrack:
+                active_modes.append("freetrack")
             if not active_modes:
                 active_modes.append("tracking")
             logger.info(f"Running in mode(s): {', '.join(active_modes)}")
@@ -367,6 +451,8 @@ def main():
         logger.info("Shutting down...")
         camera_reader.release()
         frame_dispatcher.stop()
+        if freetrack_forward_step is not None:
+            freetrack_forward_step.close()
         logger.info("Shutdown complete")
 
 

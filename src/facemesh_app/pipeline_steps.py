@@ -4,9 +4,12 @@ Each step processes data and passes it to the next step in the pipeline.
 """
 
 import logging
+import math
 import socket
 import struct
-from typing import Optional
+from collections import deque
+from dataclasses import dataclass
+from typing import Deque, Optional, Tuple
 
 import cv2
 import mediapipe as mp
@@ -647,22 +650,173 @@ class OverlayStep:
             )
 
 
-class UDPForwardStep:
-    """Final pipeline step: Forward calibrated face and gaze data via UDP to external applications.
+@dataclass(frozen=True)
+class GazeDirection:
+    """Gaze direction handed to output steps, in degrees, opentrack axis convention."""
 
-    This step sends the processed and calibrated data to external applications via UDP protocol.
-    It is disabled by default and can be enabled when needed for real-time data streaming.
+    yaw: float
+    pitch: float
+
+
+class GazeSmoothingStep:
+    """Pipeline step: Steady the calibrated gaze by averaging it over a trailing time window.
+
+    Movement within the threshold is treated as fixation jitter and averaged away. When the
+    gaze leaves the current fixation for good, only a short tail of the previous fixation is
+    kept, so the view moves to the new fixation promptly while still easing into it.
+    The output depends only on the samples inside the window, so a held gaze always settles
+    on its calibrated absolute direction no matter how fast or slow it got there.
+    """
+
+    def __init__(
+        self,
+        window_ms: int = 0,
+        reset_window_ms: Optional[int] = None,
+        reset_threshold_deg: float = 1.0,
+    ):
+        """Initialize gaze smoothing step.
+
+        Args:
+            window_ms: Length of the averaging window in milliseconds; 0 forwards the gaze raw
+            reset_window_ms: Tail of the previous fixation kept after a jump; None disables jumps
+            reset_threshold_deg: Distance from the current fixation beyond fixation jitter
+        """
+        self.window_ms = window_ms
+        self.reset_window_ms = reset_window_ms
+        self.reset_threshold_deg = reset_threshold_deg
+        self.jump_count = 0
+        self._samples: Deque[Tuple[int, float, float]] = deque()
+        self._fixation_ts = 0
+        self._candidate: Optional[Tuple[int, float, float]] = None
+
+        logger.debug(
+            f"GazeSmoothingStep initialized: window_ms={window_ms}, "
+            f"reset_window_ms={reset_window_ms}, reset_threshold_deg={reset_threshold_deg}"
+        )
+
+    def _trim(self, ts: int) -> None:
+        horizon = ts - self.window_ms
+        tail_start = (
+            self._fixation_ts - self.reset_window_ms
+            if self.reset_window_ms is not None
+            else horizon
+        )
+        while self._samples and (
+            self._samples[0][0] <= horizon or self._samples[0][0] < tail_start
+        ):
+            self._samples.popleft()
+
+    @staticmethod
+    def _mean(samples) -> Tuple[float, float]:
+        count = len(samples)
+        return (
+            sum(sample[1] for sample in samples) / count,
+            sum(sample[2] for sample in samples) / count,
+        )
+
+    def _drop_candidate(self) -> None:
+        if (
+            self._candidate is not None
+            and self._samples
+            and self._samples[-1] == self._candidate
+        ):
+            self._samples.pop()
+        self._candidate = None
+
+    def _start_fixation(self, sample: Tuple[int, float, float]) -> None:
+        self._samples.clear()
+        self._candidate = None
+        self._fixation_ts = sample[0]
+        self._samples.append(sample)
+
+    def _accept(self, sample: Tuple[int, float, float]) -> None:
+        fixation = [
+            entry
+            for entry in self._samples
+            if entry[0] >= self._fixation_ts and entry != self._candidate
+        ]
+        if not fixation:
+            self._start_fixation(sample)
+            return
+
+        _, yaw, pitch = sample
+        fixation_yaw, fixation_pitch = self._mean(fixation)
+        off_fixation = math.hypot(yaw - fixation_yaw, pitch - fixation_pitch)
+        candidate = self._candidate
+        if off_fixation <= self.reset_threshold_deg:
+            self._drop_candidate()
+        elif candidate is not None and math.hypot(
+            yaw - candidate[1], pitch - candidate[2]
+        ) < off_fixation:
+            self._fixation_ts = candidate[0]
+            self._candidate = None
+            self.jump_count += 1
+        else:
+            self._drop_candidate()
+            self._candidate = sample
+        self._samples.append(sample)
+
+    def receive_frame(
+        self,
+        frame: np.ndarray,
+        face_mesh_event: Optional[FaceMeshEvent],
+        calibrated_event: Optional[CalibratedFaceAndGazeEvent],
+    ) -> Optional[GazeDirection]:
+        """Produce the gaze direction to forward for this frame.
+
+        Args:
+            frame: Input frame (not used but kept for interface consistency)
+            face_mesh_event: Face mesh data (optional)
+            calibrated_event: Calibrated face and gaze data (optional)
+
+        Returns:
+            Gaze averaged over the window, or None when the frame has no calibrated gaze
+        """
+        if calibrated_event is None:
+            self._drop_candidate()
+            return None
+
+        try:
+            yaw = float(calibrated_event.corrected_yaw)
+            pitch = float(calibrated_event.corrected_pitch)
+        except (TypeError, ValueError) as e:
+            logger.debug(f"Skipping frame without calibrated gaze: {e}")
+            self._drop_candidate()
+            return None
+
+        if self.window_ms <= 0:
+            return GazeDirection(yaw=yaw, pitch=pitch)
+
+        ts = calibrated_event.face_mesh_event.ts
+        sample = (ts, yaw, pitch)
+        self._trim(ts)
+        if not self._samples:
+            self._start_fixation(sample)
+        elif self.reset_window_ms is None:
+            self._samples.append(sample)
+        else:
+            self._accept(sample)
+        self._trim(ts)
+
+        mean_yaw, mean_pitch = self._mean(self._samples)
+        return GazeDirection(yaw=mean_yaw, pitch=mean_pitch)
+
+
+class OpenTrackForwardStep:
+    """Final pipeline step: Forward calibrated face and gaze data to opentrack's UDP tracker input.
+
+    It is disabled by default and can be enabled when opentrack is the consumer of the pose stream.
     """
 
     def __init__(
         self, host: str = "127.0.0.1", port: int = 4242, enabled: bool = False
     ):
-        """Initialize UDP forward step.
+        """Initialize OpenTrack forward step.
 
         Args:
-            host: Target host address (default: "127.0.0.1")
-            port: Target port number (default: 4242)
-            enabled: Whether UDP forwarding is active (default: False)
+            host: opentrack host address (default: "127.0.0.1")
+            port: opentrack UDP tracker port (default: 4242)
+            enabled: Whether OpenTrack forwarding is active (default: False)
         """
         self.host = host
         self.port = port
@@ -674,7 +828,7 @@ class UDPForwardStep:
             self._create_socket()
 
         logger.debug(
-            f"UDPForwardStep initialized: host={host}, port={port}, enabled={enabled}"
+            f"OpenTrackForwardStep initialized: host={host}, port={port}, enabled={enabled}"
         )
 
     def _create_socket(self) -> None:
@@ -699,10 +853,10 @@ class UDPForwardStep:
                 self._socket = None
 
     def set_enabled(self, enabled: bool) -> None:
-        """Enable or disable UDP forwarding.
+        """Enable or disable OpenTrack forwarding.
 
         Args:
-            enabled: Whether to enable UDP forwarding
+            enabled: Whether to enable OpenTrack forwarding
         """
         if self.enabled == enabled:
             return
@@ -714,13 +868,16 @@ class UDPForwardStep:
         else:
             self._close_socket()
 
-        logger.debug(f"UDPForwardStep enabled: {enabled}")
+        logger.debug(f"OpenTrackForwardStep enabled: {enabled}")
 
-    def _serialize_event(self, event: CalibratedFaceAndGazeEvent) -> bytes:
+    def _serialize_event(
+        self, event: CalibratedFaceAndGazeEvent, gaze: GazeDirection
+    ) -> bytes:
         """Serialize calibrated event to OpenTrack UDP payload.
 
         Args:
             event: Calibrated face and gaze event
+            gaze: Gaze direction to forward as yaw and pitch
 
         Returns:
             Binary OpenTrack pose payload
@@ -742,58 +899,56 @@ class UDPForwardStep:
             if face_event and face_event.camera_z is not None
             else 0.0
         )
-        yaw = float(event.corrected_yaw)
-       
-        pitch = float(event.corrected_pitch)
         roll = (
             float(face_event.roll)
             if face_event and face_event.roll is not None
             else 0.0
         )
-        return struct.pack("<6d", head_x, head_y, head_z, yaw, pitch, roll)
+        return struct.pack(
+            "<6d", head_x, head_y, head_z, gaze.yaw, gaze.pitch, roll
+        )
 
     def receive_frame(
         self,
         frame: np.ndarray,
         face_mesh_event: Optional[FaceMeshEvent],
         calibrated_event: Optional[CalibratedFaceAndGazeEvent],
+        gaze: Optional[GazeDirection],
     ) -> None:
-        """Forward calibrated data via UDP.
+        """Forward calibrated data to opentrack.
 
         Args:
             frame: Input frame (not used but kept for interface consistency)
             face_mesh_event: Face mesh data (optional)
             calibrated_event: Calibrated face and gaze data (optional)
-
-        Note:
-            This method doesn't return anything - it sends data via UDP.
+            gaze: Gaze direction to forward (optional)
         """
         if not self.enabled:
             return
 
-        if calibrated_event is None:
-            logger.debug("Calibrated event is None, skipping UDP forward")
+        if calibrated_event is None or gaze is None:
+            logger.debug("No calibrated gaze, skipping OpenTrack forward")
             return
 
         if self._socket is None:
-            logger.warning("UDP socket is None, skipping UDP forward")
+            logger.warning("UDP socket is None, skipping OpenTrack forward")
             return
 
         try:
-            message_bytes = self._serialize_event(calibrated_event)
+            message_bytes = self._serialize_event(calibrated_event, gaze)
 
             self._socket.sendto(message_bytes, (self.host, self.port))
 
             logger.debug(
-                f"UDP message sent to {self.host}:{self.port}: {len(message_bytes)} bytes"
+                f"OpenTrack pose sent to {self.host}:{self.port}: {len(message_bytes)} bytes"
             )
 
         except (socket.error, OSError) as e:
-            logger.warning(f"Socket error sending UDP message: {e}")
+            logger.warning(f"Socket error sending OpenTrack pose: {e}")
         except (TypeError, ValueError) as e:
-            logger.error(f"Serialization error sending UDP message: {e}")
+            logger.error(f"Serialization error sending OpenTrack pose: {e}")
         except Exception as e:
-            logger.error(f"Unexpected error sending UDP message: {e}")
+            logger.error(f"Unexpected error sending OpenTrack pose: {e}")
 
     def __del__(self):
         """Cleanup when object is destroyed."""

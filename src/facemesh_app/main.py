@@ -168,8 +168,8 @@ def parse_args():
         "--opentrack-dir",
         type=Path,
         default=os.getenv("OPENTRACK_DIR"),
-        help="opentrack installation providing the FreeTrack/NPClient client libraries "
-        "(default: auto-detected)",
+        help="opentrack installation folder (containing opentrack.exe) whose client "
+        "libraries games load for --freetrack (default: auto-detected)",
     )
 
     args = parser.parse_args()
@@ -182,6 +182,12 @@ def parse_args():
     if args.freetrack and sys.platform != "win32":
         parser.error("--freetrack requires Windows")
     return args
+
+
+def _exit_with(error: Exception) -> None:
+    for line in str(error).splitlines():
+        logger.error(line)
+    sys.exit(1)
 
 
 def main():
@@ -199,6 +205,18 @@ def main():
     args = parse_args()
     if args.capture_live:
         args.capture = True
+
+    opentrack_dir = None
+    if args.freetrack:
+        from facemesh_app.freetrack import FreeTrackSetupError, resolve_opentrack_dir
+
+        try:
+            opentrack_dir = resolve_opentrack_dir(
+                args.opentrack_dir, args.freetrack_interface
+            )
+        except FreeTrackSetupError as e:
+            _exit_with(e)
+        logger.info(f"FreeTrack: using opentrack installation at {opentrack_dir}")
 
     no_explicit_mode = not (
         args.overlay
@@ -382,14 +400,17 @@ def main():
     )
 
     freetrack_forward_step = None
-    if args.freetrack:
-        from facemesh_app.freetrack import FreeTrackForwardStep
+    if opentrack_dir is not None:
+        from facemesh_app.freetrack import FreeTrackForwardStep, FreeTrackSetupError
 
-        freetrack_forward_step = FreeTrackForwardStep(
-            interface=args.freetrack_interface,
-            opentrack_dir=args.opentrack_dir,
-            enabled=True,
-        )
+        try:
+            freetrack_forward_step = FreeTrackForwardStep(
+                opentrack_dir=opentrack_dir,
+                interface=args.freetrack_interface,
+                enabled=True,
+            )
+        except FreeTrackSetupError as e:
+            _exit_with(e)
 
     frame_dispatcher = FrameDispatcher(
         args,

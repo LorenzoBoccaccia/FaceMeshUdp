@@ -37,7 +37,7 @@ from .pipeline_steps import (
     CalibrationAdapterStep,
     CaptureStep,
     OverlayStep,
-    UDPForwardStep,
+    OpenTrackForwardStep,
 )
 
 logger = logging.getLogger(__name__)
@@ -173,7 +173,8 @@ class FrameDispatcher:
         calibration_adapter_step=None,
         capture_step=None,
         overlay_step=None,
-        udp_forward_step=None,
+        opentrack_forward_step=None,
+        freetrack_forward_step=None,
     ):
         self.args = args
         self.calibration = calibration
@@ -183,7 +184,8 @@ class FrameDispatcher:
         self.calibration_adapter_step = calibration_adapter_step
         self.capture_step = capture_step
         self.overlay_step = overlay_step
-        self.udp_forward_step = udp_forward_step
+        self.opentrack_forward_step = opentrack_forward_step
+        self.freetrack_forward_step = freetrack_forward_step
 
         self.display: Optional[Dict] = None
         self.running = False
@@ -242,8 +244,15 @@ class FrameDispatcher:
         if self.capture_step is not None:
             self.capture_step.receive_frame(pipeline_frame, evt, calibrated_evt)
 
-        if self.udp_forward_step is not None:
-            self.udp_forward_step.receive_frame(pipeline_frame, evt, calibrated_evt)
+        if self.opentrack_forward_step is not None:
+            self.opentrack_forward_step.receive_frame(
+                pipeline_frame, evt, calibrated_evt
+            )
+
+        if self.freetrack_forward_step is not None:
+            self.freetrack_forward_step.receive_frame(
+                pipeline_frame, evt, calibrated_evt
+            )
 
         return calibrated_evt, pipeline_frame
 
@@ -1033,10 +1042,10 @@ class FrameDispatcher:
         if self.overlay_step is not None:
             self.overlay_step.set_show_hud(show_hud)
 
-    def set_udp_forwarding_enabled(self, enabled: bool) -> None:
-        """Enable or disable UDP data forwarding."""
-        if self.udp_forward_step is not None:
-            self.udp_forward_step.set_enabled(enabled)
+    def set_opentrack_forwarding_enabled(self, enabled: bool) -> None:
+        """Enable or disable OpenTrack data forwarding."""
+        if self.opentrack_forward_step is not None:
+            self.opentrack_forward_step.set_enabled(enabled)
 
     def update_calibration(self, pitch: float, yaw: float, roll: float) -> None:
         """Update the calibration adapter's pitch/yaw/roll offsets."""

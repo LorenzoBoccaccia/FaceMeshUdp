@@ -1,6 +1,6 @@
 # FaceMeshUdp
 
-Python face-tracking app built on MediaPipe FaceLandmarker. Produces gaze/head-pose output with an optional overlay, capture tooling, a 9-point calibration workflow, and UDP forwarding to OpenTrack. See [eyes.ini](eyes.ini) for an example opentrack profile that consumes the UDP stream.
+Python face-tracking app built on MediaPipe FaceLandmarker. Produces gaze/head-pose output with an optional overlay, capture tooling, a 9-point calibration workflow, UDP forwarding to OpenTrack, and direct FreeTrack 2.0 Enhanced output to games. See [eyes.ini](eyes.ini) for an example opentrack profile that consumes the UDP stream.
 
 [![Demo reel](demo.gif)](https://youtu.be/I_M037X3Fb8)
 
@@ -15,7 +15,7 @@ pip install -e ".[dev]"
 ## Calibrate and run
 
 `calibrate.bat` records the `default` profile into `calibration-default.json`, `start.bat`
-loads it and forwards over UDP. Both run from the repository root, use `.venv`, and pass any
+loads it and forwards to OpenTrack. Both run from the repository root, use `.venv`, and pass any
 extra arguments through to the app (`start.bat --camera-index 1`).
 
 ```powershell
@@ -27,19 +27,20 @@ Equivalent direct invocation:
 
 ```powershell
 python -m facemesh_app.main --calibrate
-python -m facemesh_app.main --udp 
+python -m facemesh_app.main --opentrack
 ```
 
 ## Options
 
-At least one mode flag (`--overlay`, `--capture`, `--udp`, `--calibrate`) must be set.
+At least one mode flag (`--overlay`, `--capture`, `--opentrack`, `--freetrack`, `--calibrate`) must be set.
 
 Modes:
 
 - `--overlay` — transparent overlay window with live landmarks
 - `--capture` — save frames/mesh data on click (implies overlay)
 - `--capture-live` / `--live` — show live camera feed in the capture window
-- `--udp` — forward calibrated gaze output over UDP
+- `--opentrack` — forward calibrated gaze output to opentrack's UDP tracker
+- `--freetrack` — publish calibrated gaze straight to FreeTrack/TrackIR games (Windows, no opentrack process needed)
 - `--calibrate` / `--calibration` — run the 9-point calibration workflow
 - `--force-recalibrate` — ignore any stored profile and recalibrate
 - `--calibration-profile NAME` — named calibration profile (defaults to `default`)
@@ -57,10 +58,15 @@ ladder of (backend, format, size) candidates from cheapest to most expensive
 on startup and accepts the first one that the camera actually delivers
 without hitting the driver's CPU-scaling slow path.
 
-UDP:
+OpenTrack:
 
-- `--udp-host HOST` (`UDP_HOST`, default `127.0.0.1`)
-- `--udp-port PORT` (`UDP_PORT`, default 4242)
+- `--opentrack-host HOST` (`OPENTRACK_HOST`, default `127.0.0.1`)
+- `--opentrack-port PORT` (`OPENTRACK_PORT`, default 4242)
+
+FreeTrack:
+
+- `--freetrack-interface both|freetrack|npclient` — interface exposed to games (default `both`)
+- `--opentrack-dir DIR` (`OPENTRACK_DIR`, default auto-detected) — opentrack install whose client DLLs games load
 
 Misc:
 

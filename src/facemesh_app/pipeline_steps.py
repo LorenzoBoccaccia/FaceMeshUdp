@@ -647,22 +647,21 @@ class OverlayStep:
             )
 
 
-class UDPForwardStep:
-    """Final pipeline step: Forward calibrated face and gaze data via UDP to external applications.
+class OpenTrackForwardStep:
+    """Final pipeline step: Forward calibrated face and gaze data to opentrack's UDP tracker input.
 
-    This step sends the processed and calibrated data to external applications via UDP protocol.
-    It is disabled by default and can be enabled when needed for real-time data streaming.
+    It is disabled by default and can be enabled when opentrack is the consumer of the pose stream.
     """
 
     def __init__(
         self, host: str = "127.0.0.1", port: int = 4242, enabled: bool = False
     ):
-        """Initialize UDP forward step.
+        """Initialize OpenTrack forward step.
 
         Args:
-            host: Target host address (default: "127.0.0.1")
-            port: Target port number (default: 4242)
-            enabled: Whether UDP forwarding is active (default: False)
+            host: opentrack host address (default: "127.0.0.1")
+            port: opentrack UDP tracker port (default: 4242)
+            enabled: Whether OpenTrack forwarding is active (default: False)
         """
         self.host = host
         self.port = port
@@ -674,7 +673,7 @@ class UDPForwardStep:
             self._create_socket()
 
         logger.debug(
-            f"UDPForwardStep initialized: host={host}, port={port}, enabled={enabled}"
+            f"OpenTrackForwardStep initialized: host={host}, port={port}, enabled={enabled}"
         )
 
     def _create_socket(self) -> None:
@@ -699,10 +698,10 @@ class UDPForwardStep:
                 self._socket = None
 
     def set_enabled(self, enabled: bool) -> None:
-        """Enable or disable UDP forwarding.
+        """Enable or disable OpenTrack forwarding.
 
         Args:
-            enabled: Whether to enable UDP forwarding
+            enabled: Whether to enable OpenTrack forwarding
         """
         if self.enabled == enabled:
             return
@@ -714,7 +713,7 @@ class UDPForwardStep:
         else:
             self._close_socket()
 
-        logger.debug(f"UDPForwardStep enabled: {enabled}")
+        logger.debug(f"OpenTrackForwardStep enabled: {enabled}")
 
     def _serialize_event(self, event: CalibratedFaceAndGazeEvent) -> bytes:
         """Serialize calibrated event to OpenTrack UDP payload.
@@ -758,25 +757,22 @@ class UDPForwardStep:
         face_mesh_event: Optional[FaceMeshEvent],
         calibrated_event: Optional[CalibratedFaceAndGazeEvent],
     ) -> None:
-        """Forward calibrated data via UDP.
+        """Forward calibrated data to opentrack.
 
         Args:
             frame: Input frame (not used but kept for interface consistency)
             face_mesh_event: Face mesh data (optional)
             calibrated_event: Calibrated face and gaze data (optional)
-
-        Note:
-            This method doesn't return anything - it sends data via UDP.
         """
         if not self.enabled:
             return
 
         if calibrated_event is None:
-            logger.debug("Calibrated event is None, skipping UDP forward")
+            logger.debug("Calibrated event is None, skipping OpenTrack forward")
             return
 
         if self._socket is None:
-            logger.warning("UDP socket is None, skipping UDP forward")
+            logger.warning("UDP socket is None, skipping OpenTrack forward")
             return
 
         try:
@@ -785,15 +781,15 @@ class UDPForwardStep:
             self._socket.sendto(message_bytes, (self.host, self.port))
 
             logger.debug(
-                f"UDP message sent to {self.host}:{self.port}: {len(message_bytes)} bytes"
+                f"OpenTrack pose sent to {self.host}:{self.port}: {len(message_bytes)} bytes"
             )
 
         except (socket.error, OSError) as e:
-            logger.warning(f"Socket error sending UDP message: {e}")
+            logger.warning(f"Socket error sending OpenTrack pose: {e}")
         except (TypeError, ValueError) as e:
-            logger.error(f"Serialization error sending UDP message: {e}")
+            logger.error(f"Serialization error sending OpenTrack pose: {e}")
         except Exception as e:
-            logger.error(f"Unexpected error sending UDP message: {e}")
+            logger.error(f"Unexpected error sending OpenTrack pose: {e}")
 
     def __del__(self):
         """Cleanup when object is destroyed."""

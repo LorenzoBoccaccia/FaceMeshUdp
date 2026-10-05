@@ -6,7 +6,9 @@ Each step processes data and passes it to the next step in the pipeline.
 import logging
 import socket
 import struct
-from typing import Optional
+from collections import deque
+from dataclasses import dataclass
+from typing import Deque, Optional, Tuple
 
 import cv2
 import mediapipe as mp
@@ -647,6 +649,74 @@ class OverlayStep:
             )
 
 
+@dataclass(frozen=True)
+class GazeDirection:
+    """Gaze direction handed to output steps, in degrees, opentrack axis convention."""
+
+    yaw: float
+    pitch: float
+
+
+class GazeSmoothingStep:
+    """Pipeline step: Steady the calibrated gaze by averaging it over a trailing time window.
+
+    The output depends only on the samples inside the window, so a held gaze always settles
+    on its calibrated absolute direction no matter how fast or slow it got there.
+    """
+
+    def __init__(self, window_ms: int = 0):
+        """Initialize gaze smoothing step.
+
+        Args:
+            window_ms: Length of the averaging window in milliseconds; 0 forwards the gaze raw
+        """
+        self.window_ms = window_ms
+        self._samples: Deque[Tuple[int, float, float]] = deque()
+
+        logger.debug(f"GazeSmoothingStep initialized: window_ms={window_ms}")
+
+    def receive_frame(
+        self,
+        frame: np.ndarray,
+        face_mesh_event: Optional[FaceMeshEvent],
+        calibrated_event: Optional[CalibratedFaceAndGazeEvent],
+    ) -> Optional[GazeDirection]:
+        """Produce the gaze direction to forward for this frame.
+
+        Args:
+            frame: Input frame (not used but kept for interface consistency)
+            face_mesh_event: Face mesh data (optional)
+            calibrated_event: Calibrated face and gaze data (optional)
+
+        Returns:
+            Gaze averaged over the window, or None when the frame has no calibrated gaze
+        """
+        if calibrated_event is None:
+            return None
+
+        try:
+            yaw = float(calibrated_event.corrected_yaw)
+            pitch = float(calibrated_event.corrected_pitch)
+        except (TypeError, ValueError) as e:
+            logger.debug(f"Skipping frame without calibrated gaze: {e}")
+            return None
+
+        if self.window_ms <= 0:
+            return GazeDirection(yaw=yaw, pitch=pitch)
+
+        ts = calibrated_event.face_mesh_event.ts
+        self._samples.append((ts, yaw, pitch))
+        horizon = ts - self.window_ms
+        while self._samples[0][0] <= horizon:
+            self._samples.popleft()
+
+        count = len(self._samples)
+        return GazeDirection(
+            yaw=sum(sample[1] for sample in self._samples) / count,
+            pitch=sum(sample[2] for sample in self._samples) / count,
+        )
+
+
 class OpenTrackForwardStep:
     """Final pipeline step: Forward calibrated face and gaze data to opentrack's UDP tracker input.
 
@@ -715,11 +785,14 @@ class OpenTrackForwardStep:
 
         logger.debug(f"OpenTrackForwardStep enabled: {enabled}")
 
-    def _serialize_event(self, event: CalibratedFaceAndGazeEvent) -> bytes:
+    def _serialize_event(
+        self, event: CalibratedFaceAndGazeEvent, gaze: GazeDirection
+    ) -> bytes:
         """Serialize calibrated event to OpenTrack UDP payload.
 
         Args:
             event: Calibrated face and gaze event
+            gaze: Gaze direction to forward as yaw and pitch
 
         Returns:
             Binary OpenTrack pose payload
@@ -741,21 +814,21 @@ class OpenTrackForwardStep:
             if face_event and face_event.camera_z is not None
             else 0.0
         )
-        yaw = float(event.corrected_yaw)
-       
-        pitch = float(event.corrected_pitch)
         roll = (
             float(face_event.roll)
             if face_event and face_event.roll is not None
             else 0.0
         )
-        return struct.pack("<6d", head_x, head_y, head_z, yaw, pitch, roll)
+        return struct.pack(
+            "<6d", head_x, head_y, head_z, gaze.yaw, gaze.pitch, roll
+        )
 
     def receive_frame(
         self,
         frame: np.ndarray,
         face_mesh_event: Optional[FaceMeshEvent],
         calibrated_event: Optional[CalibratedFaceAndGazeEvent],
+        gaze: Optional[GazeDirection],
     ) -> None:
         """Forward calibrated data to opentrack.
 
@@ -763,12 +836,13 @@ class OpenTrackForwardStep:
             frame: Input frame (not used but kept for interface consistency)
             face_mesh_event: Face mesh data (optional)
             calibrated_event: Calibrated face and gaze data (optional)
+            gaze: Gaze direction to forward (optional)
         """
         if not self.enabled:
             return
 
-        if calibrated_event is None:
-            logger.debug("Calibrated event is None, skipping OpenTrack forward")
+        if calibrated_event is None or gaze is None:
+            logger.debug("No calibrated gaze, skipping OpenTrack forward")
             return
 
         if self._socket is None:
@@ -776,7 +850,7 @@ class OpenTrackForwardStep:
             return
 
         try:
-            message_bytes = self._serialize_event(calibrated_event)
+            message_bytes = self._serialize_event(calibrated_event, gaze)
 
             self._socket.sendto(message_bytes, (self.host, self.port))
 

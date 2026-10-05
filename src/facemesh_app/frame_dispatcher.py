@@ -37,6 +37,7 @@ from .pipeline_steps import (
     CalibrationAdapterStep,
     CaptureStep,
     OverlayStep,
+    GazeSmoothingStep,
     OpenTrackForwardStep,
 )
 
@@ -173,6 +174,7 @@ class FrameDispatcher:
         calibration_adapter_step=None,
         capture_step=None,
         overlay_step=None,
+        gaze_smoothing_step=None,
         opentrack_forward_step=None,
         freetrack_forward_step=None,
     ):
@@ -184,6 +186,7 @@ class FrameDispatcher:
         self.calibration_adapter_step = calibration_adapter_step
         self.capture_step = capture_step
         self.overlay_step = overlay_step
+        self.gaze_smoothing_step = gaze_smoothing_step
         self.opentrack_forward_step = opentrack_forward_step
         self.freetrack_forward_step = freetrack_forward_step
 
@@ -244,14 +247,20 @@ class FrameDispatcher:
         if self.capture_step is not None:
             self.capture_step.receive_frame(pipeline_frame, evt, calibrated_evt)
 
+        gaze = None
+        if self.gaze_smoothing_step is not None:
+            gaze = self.gaze_smoothing_step.receive_frame(
+                pipeline_frame, evt, calibrated_evt
+            )
+
         if self.opentrack_forward_step is not None:
             self.opentrack_forward_step.receive_frame(
-                pipeline_frame, evt, calibrated_evt
+                pipeline_frame, evt, calibrated_evt, gaze
             )
 
         if self.freetrack_forward_step is not None:
             self.freetrack_forward_step.receive_frame(
-                pipeline_frame, evt, calibrated_evt
+                pipeline_frame, evt, calibrated_evt, gaze
             )
 
         return calibrated_evt, pipeline_frame

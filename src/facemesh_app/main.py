@@ -23,6 +23,7 @@ from facemesh_app.pipeline_steps import (
     CalibrationAdapterStep,
     CaptureStep,
     OverlayStep,
+    GazeSmoothingStep,
     OpenTrackForwardStep,
 )
 from facemesh_app.state_machine import StateMachine
@@ -75,6 +76,13 @@ def parse_args():
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Publish calibrated output to games over FreeTrack 2.0 Enhanced (Windows)",
+    )
+    parser.add_argument(
+        "--smooth",
+        type=int,
+        default=0,
+        metavar="MS",
+        help="Average forwarded gaze over a trailing window of MS milliseconds (0: raw)",
     )
     parser.add_argument("--quiet", action="store_true", help="Suppress output")
     parser.add_argument(
@@ -149,6 +157,8 @@ def parse_args():
     )
 
     args = parser.parse_args()
+    if args.smooth < 0:
+        parser.error("--smooth must be 0 or a positive number of milliseconds")
     if args.freetrack and sys.platform != "win32":
         parser.error("--freetrack requires Windows")
     return args
@@ -330,6 +340,13 @@ def main():
 
     overlay_step = OverlayStep(enabled=False, show_hud=False)
 
+    gaze_smoothing_step = GazeSmoothingStep(window_ms=args.smooth)
+    logger.info(
+        f"Gaze smoothing window: {args.smooth} ms"
+        if args.smooth > 0
+        else "Gaze smoothing: off (raw)"
+    )
+
     opentrack_forward_step = OpenTrackForwardStep(
         host=args.opentrack_host,
         port=args.opentrack_port,
@@ -355,6 +372,7 @@ def main():
         calibration_adapter_step=calibration_adapter_step,
         capture_step=capture_step,
         overlay_step=overlay_step,
+        gaze_smoothing_step=gaze_smoothing_step,
         opentrack_forward_step=opentrack_forward_step,
         freetrack_forward_step=freetrack_forward_step,
     )

@@ -15,7 +15,7 @@ pip install -e ".[dev]"
 ## Calibrate and run
 
 `calibrate.bat` records the `default` profile into `calibration-default.json`, `start.bat`
-loads it and forwards to OpenTrack. Both run from the repository root, use `.venv`, and pass any
+loads it and publishes to games over FreeTrack (TrackIR interface, 200 ms gaze smoothing). Both run from the repository root, use `.venv`, and pass any
 extra arguments through to the app (`start.bat --camera-index 1`).
 
 ```powershell
@@ -70,6 +70,7 @@ FreeTrack:
 
 Misc:
 
+- `--smooth MS` — average the forwarded gaze over the last MS milliseconds (default 0, raw)
 - `--overlay-fps FPS` — overlay redraw rate (default 60)
 - `--log-interval SECONDS` — periodic stats interval (default 2.0)
 - `--quiet` — suppress console output

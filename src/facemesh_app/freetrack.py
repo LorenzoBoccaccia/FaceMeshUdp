@@ -18,6 +18,7 @@ import numpy as np
 
 from .calibration import CalibratedFaceAndGazeEvent
 from .facemesh_dao import FaceMeshEvent
+from .pipeline_steps import GazeDirection
 
 logger = logging.getLogger(__name__)
 
@@ -349,6 +350,7 @@ class FreeTrackForwardStep:
         frame: np.ndarray,
         face_mesh_event: Optional[FaceMeshEvent],
         calibrated_event: Optional[CalibratedFaceAndGazeEvent],
+        gaze: Optional[GazeDirection],
     ) -> None:
         """Publish calibrated gaze as the game view rotation.
 
@@ -356,16 +358,13 @@ class FreeTrackForwardStep:
             frame: Input frame (not used but kept for interface consistency)
             face_mesh_event: Face mesh data (optional)
             calibrated_event: Calibrated face and gaze data (optional)
+            gaze: Gaze direction to publish (optional)
         """
-        if not self.enabled or calibrated_event is None:
+        if not self.enabled or gaze is None:
             return
 
-        try:
-            yaw = -math.radians(float(calibrated_event.corrected_yaw))
-            pitch = -math.radians(float(calibrated_event.corrected_pitch))
-        except (TypeError, ValueError) as e:
-            logger.debug(f"FreeTrack: skipping frame without calibrated gaze: {e}")
-            return
+        yaw = -math.radians(gaze.yaw)
+        pitch = -math.radians(gaze.pitch)
 
         if not self._acquire():
             logger.debug("FreeTrack: shared memory busy, skipping frame")

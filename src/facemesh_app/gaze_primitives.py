@@ -15,7 +15,7 @@ COMPONENT_HEAD = "head"
 COMPONENT_EYE = "eye"
 COMPONENT_GAZE = "gaze"
 
-_RGB_BY_COMPONENT = {
+RGB_BY_COMPONENT = {
     COMPONENT_HEAD: (255, 40, 40),
     COMPONENT_EYE: (70, 180, 255),
     COMPONENT_GAZE: (80, 230, 120),
@@ -58,22 +58,10 @@ def collect_gaze_primitives(
     return primitives
 
 
-def draw_gaze_primitives_pygame(
-    surface, primitives: Sequence[GazePrimitive], *, radius: int
-) -> None:
-    """Render gaze markers into a pygame surface."""
-    import pygame
-
-    for primitive in primitives:
-        pygame.draw.circle(
-            surface, _RGB_BY_COMPONENT[primitive.component], primitive.point, int(radius)
-        )
-
-
 def draw_gaze_primitives_cv2(
     image, primitives: Sequence[GazePrimitive], *, radius: int
 ) -> None:
     """Render gaze markers into a BGR image."""
     for primitive in primitives:
-        r, g, b = _RGB_BY_COMPONENT[primitive.component]
+        r, g, b = RGB_BY_COMPONENT[primitive.component]
         cv2.circle(image, primitive.point, int(radius), (b, g, r), -1, cv2.LINE_AA)

@@ -2,11 +2,10 @@
 Calibration overlay window for 9-point calibration flow.
 """
 
-import os
 import time
 from typing import Dict, List, Optional, Tuple
 
-import pygame
+import pyglet
 
 from .calibration import REFERENCE_POINT, CalibrationPoint
 from .facemesh_dao import FaceMeshEvent
@@ -17,7 +16,7 @@ from .overlay_common import (
     GREEN,
     RED,
     WHITE,
-    set_window_topmost,
+    OverlayWindow,
 )
 
 
@@ -26,6 +25,32 @@ CALIB_BLINK_MS = 500
 CALIB_CAPTURE_MS = 500
 CALIB_REFERENCE_CAPTURE_MS = 5000
 CALIB_BLINK_PERIOD_MS = 120
+CALIB_FONT_SIZE = 24
+
+
+class _Target:
+    """A calibration dot with a white rim, hidden while it has no colour."""
+
+    def __init__(self, batch: pyglet.graphics.Batch, rim_group, dot_group):
+        self._rim = pyglet.shapes.Circle(
+            0, 0, DOT_RADIUS + 2, color=WHITE, batch=batch, group=rim_group
+        )
+        self._dot = pyglet.shapes.Circle(0, 0, DOT_RADIUS, batch=batch, group=dot_group)
+        self.show(None, None)
+
+    def show(
+        self,
+        position: Optional[Tuple[float, float]],
+        color: Optional[Tuple[int, int, int]],
+    ) -> None:
+        """Place the target in the given colour, or hide it when it has no position or colour."""
+        visible = position is not None and color is not None
+        self._rim.visible = visible
+        self._dot.visible = visible
+        if visible:
+            self._rim.position = position
+            self._dot.position = position
+            self._dot.color = color
 
 
 class CalibrationOverlayManager:
@@ -41,13 +66,10 @@ class CalibrationOverlayManager:
         self._width = int(display["width"])
         self._height = int(display["height"])
 
-        self._screen = None
-        self._clock = None
-        self._font = None
-        self._hwnd = None
-
-        self._running = False
-        self._should_exit = False
+        self._window: Optional[OverlayWindow] = None
+        self._nose_target: Optional[_Target] = None
+        self._eye_target: Optional[_Target] = None
+        self._text: Optional[pyglet.text.Label] = None
 
         self._calibration_sequence: List[Dict] = []
         self._current_calib_idx: int = 0
@@ -61,58 +83,58 @@ class CalibrationOverlayManager:
 
     def initialize(self):
         """Create and configure calibration overlay window."""
-        pygame.init()
-        pygame.font.init()
-        os.environ.setdefault(
-            "SDL_VIDEO_WINDOW_POS", f"{self._display['x']},{self._display['y']}"
+        self._window = OverlayWindow(
+            self._display,
+            "FaceMesh Calibration",
+            self._overlay_fps,
+            click_through=False,
+            background=BLACK,
         )
-        self._screen = pygame.display.set_mode(
-            (self._width, self._height), pygame.NOFRAME
+        batch = self._window.batch
+        rim_group = pyglet.graphics.Group(order=0)
+        dot_group = pyglet.graphics.Group(order=1)
+        self._nose_target = _Target(batch, rim_group, dot_group)
+        self._eye_target = _Target(batch, rim_group, dot_group)
+        self._text = pyglet.text.Label(
+            "",
+            x=self._width / 2,
+            y=self._height / 4,
+            width=self._width,
+            multiline=True,
+            align="center",
+            anchor_x="center",
+            anchor_y="top",
+            font_size=CALIB_FONT_SIZE,
+            color=(*WHITE, 255),
+            batch=batch,
+            group=pyglet.graphics.Group(order=2),
         )
-        pygame.display.set_caption("FaceMesh Calibration")
-        self._hwnd = pygame.display.get_wm_info().get("window")
-        set_window_topmost(self._hwnd)
-        self._clock = pygame.time.Clock()
-        self._font = pygame.font.Font(None, 34)
-        self._running = True
 
     def shutdown(self):
         """Close calibration overlay resources."""
-        if self._screen:
-            pygame.quit()
-        self._running = False
+        if self._window is not None:
+            self._window.close()
+            self._window = None
 
     def handle_events(self):
         """Process calibration window events."""
-        for e in pygame.event.get():
-            if e.type == pygame.QUIT:
-                self._should_exit = True
-            elif e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE:
-                self._should_exit = True
-            elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
-                self._click_pending = True
+        self._window.poll()
+        if self._window.take_click():
+            self._click_pending = True
 
     def render(self):
         """Render one calibration frame."""
-        self._screen.fill(BLACK)
-        if self._calib_phase != "idle":
-            current_point = self.get_current_calib_point()
-            if current_point:
-                current_time = int(time.time() * 1000)
-                elapsed_ms = current_time - self._calib_phase_start
-                self.render_calibration(current_point, self._calib_phase, elapsed_ms)
-        pygame.display.update()
-        self._clock.tick(max(1, int(self._overlay_fps)))
-
-    def clear(self):
-        """Clear calibration overlay surface."""
-        self._screen.fill(BLACK)
-
-    def update(self):
-        """Flip buffers and enforce target frame rate."""
-        pygame.display.update()
-        if self._clock:
-            self._clock.tick(max(1, int(self._overlay_fps)))
+        current_point = (
+            self.get_current_calib_point() if self._calib_phase != "idle" else None
+        )
+        if current_point is None:
+            self._nose_target.show(None, None)
+            self._eye_target.show(None, None)
+            self._set_text("")
+        else:
+            elapsed_ms = int(time.time() * 1000) - self._calib_phase_start
+            self._show_calibration(current_point, self._calib_phase, elapsed_ms)
+        self._window.present()
 
     def start_calibration_sequence(self, width: float, height: float):
         """Initialize calibration sequence targets and reset state."""
@@ -185,17 +207,18 @@ class CalibrationOverlayManager:
         self._calib_samples = []
         self._click_pending = False
 
-    def render_calibration(
+    def _set_text(self, text: str) -> None:
+        if self._text.text != text:
+            self._text.text = text
+
+    def _show_calibration(
         self,
         current_point: Dict,
         phase: str,
         elapsed_ms: int,
     ):
-        """Render calibration target for current phase."""
-        nose_x = int(round(current_point["nose_x"]))
-        nose_y = int(round(current_point["nose_y"]))
-        eye_x = int(round(current_point["eye_x"]))
-        eye_y = int(round(current_point["eye_y"]))
+        nose = (current_point["nose_x"], current_point["nose_y"])
+        eye = (current_point["eye_x"], current_point["eye_y"])
 
         if phase == "blink":
             show = (elapsed_ms // CALIB_BLINK_PERIOD_MS) % 2 == 0
@@ -208,12 +231,10 @@ class CalibrationOverlayManager:
             nose_color = RED
             eye_color = GREEN
 
-        if nose_color is not None:
-            pygame.draw.circle(self._screen, nose_color, (nose_x, nose_y), DOT_RADIUS)
-            pygame.draw.circle(self._screen, WHITE, (nose_x, nose_y), DOT_RADIUS + 2, 2)
-        if eye_color is not None and (eye_x, eye_y) != (nose_x, nose_y):
-            pygame.draw.circle(self._screen, eye_color, (eye_x, eye_y), DOT_RADIUS)
-            pygame.draw.circle(self._screen, WHITE, (eye_x, eye_y), DOT_RADIUS + 2, 2)
+        self._nose_target.show(self._window.window_point(*nose), nose_color)
+        self._eye_target.show(
+            self._window.window_point(*eye) if eye != nose else None, eye_color
+        )
 
         instruction = current_point.get("instruction", "")
         label = f"Step {self._current_calib_idx + 1}/{len(self._calibration_sequence)}"
@@ -231,15 +252,7 @@ class CalibrationOverlayManager:
         lines.extend(line for line in instruction.split("\n") if line)
         if phase_hint:
             lines.append(phase_hint)
-
-        base_y = int(self._height * 3 / 4)
-        line_height = self._font.get_linesize()
-        for i, line in enumerate(lines):
-            text_surface = self._font.render(line, True, WHITE)
-            text_rect = text_surface.get_rect(
-                center=(self._width // 2, base_y + i * line_height)
-            )
-            self._screen.blit(text_surface, text_rect)
+        self._set_text("\n".join(lines))
 
     def _make_calib_seq(self, width: float, height: float) -> List[Dict]:
         """Generate the calibration target list."""
@@ -343,10 +356,6 @@ class CalibrationOverlayManager:
             },
         ]
 
-    def request_exit(self) -> None:
-        """Signal the calibration window to close."""
-        self._should_exit = True
-
     def is_running(self) -> bool:
         """Report whether calibration window should continue."""
-        return self._running and not self._should_exit
+        return self._window is not None and not self._window.exit_requested

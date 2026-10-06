@@ -5,7 +5,7 @@ binaries = []
 hiddenimports = []
 tmp_ret = collect_all('mediapipe')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('pygame')
+tmp_ret = collect_all('pyglet')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('cv2')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
@@ -30,6 +30,7 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+a.binaries = [entry for entry in a.binaries if 'opencv_videoio_ffmpeg' not in entry[0]]
 pyz = PYZ(a.pure)
 
 exe = EXE(

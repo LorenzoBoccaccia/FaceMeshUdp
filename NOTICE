@@ -35,30 +35,11 @@ SciPy
     Licensed under the BSD 3-Clause License.
     https://github.com/scipy/scipy
 
-pygame
-    Copyright (C) 2000-2024 Pete Shinners, Rene Dudfield, and contributors.
-    Licensed under the GNU Lesser General Public License, version 2.1
-    or (at your option) any later version.
-    https://github.com/pygame/pygame
-
-    This distribution includes compiled pygame extension modules in
-    `_internal/pygame/` as replaceable shared library files. You may
-    replace them with a modified version of the pygame library compiled
-    for the same Python version. The corresponding source code for
-    pygame (and for the SDL, SDL_image, SDL_mixer, SDL_ttf, freetype,
-    and portmidi libraries it bundles) is available from the URLs above
-    and below, or from the copyright holder on written request to the
-    address given at the top of this file, for a period of at least
-    three years from the date of this distribution.
-
-pygame bundles:
-
-  SDL 2   - zlib License - https://www.libsdl.org/
-  SDL2_image - zlib License - https://github.com/libsdl-org/SDL_image
-  SDL2_mixer - zlib License - https://github.com/libsdl-org/SDL_mixer
-  SDL2_ttf   - zlib License - https://github.com/libsdl-org/SDL_ttf
-  FreeType   - FreeType License (BSD-style) - https://freetype.org/
-  PortMidi   - MIT License - https://github.com/PortMidi/portmidi
+pyglet
+    Copyright (c) 2006-2008 Alex Holkner
+    Copyright (c) 2008-2023 pyglet contributors
+    Licensed under the BSD 3-Clause License.
+    https://github.com/pyglet/pyglet
 
 ------------------------------------------------------------------------
 

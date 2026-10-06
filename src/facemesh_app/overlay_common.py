@@ -1,108 +1,125 @@
 """
-Shared overlay helpers and display/window configuration.
+Overlay window shared by the calibration and runtime overlays, and the display geometry they cover.
 """
 
 import ctypes
+import math
 import sys
-from typing import Dict
+import time
+from typing import Dict, Optional, Tuple
 
-import pygame
+import pyglet
 
-
-KEY_COLOR = (1, 0, 1)
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 BLUE = (70, 180, 255)
-HUD_BG = (20, 20, 20)
 RED = (255, 40, 40)
 GREEN = (80, 230, 120)
 DOT_RADIUS = 14
 
 
-def set_window_transparent(hwnd):
-    """Set the overlay window to color-key transparency."""
-    if sys.platform != "win32" or not hwnd:
-        return
+class OverlayWindow:
+    """A borderless window covering the display above all other windows, redrawn at most at a set rate.
+
+    The window is see-through wherever nothing is drawn unless it is given a background. A
+    click-through window lets the mouse reach whatever lies underneath; otherwise it collects left
+    clicks. Escape or closing the window asks the overlay to end.
+    """
+
+    def __init__(
+        self,
+        display: Dict,
+        caption: str,
+        fps: int,
+        click_through: bool,
+        background: Optional[Tuple[int, int, int]] = None,
+    ):
+        self.width = int(display["width"])
+        self.height = int(display["height"])
+        self.batch = pyglet.graphics.Batch()
+        self._frame_interval = 1.0 / max(1, int(fps))
+        self._last_frame = -math.inf
+        self._clicked = False
+        self._window = pyglet.window.Window(
+            self.width,
+            self.height,
+            caption=caption,
+            style=pyglet.window.Window.WINDOW_STYLE_OVERLAY,
+            vsync=False,
+            visible=False,
+        )
+        self._window.set_location(int(display["x"]), int(display["y"]))
+        self._window.set_mouse_passthrough(click_through)
+        if background is not None:
+            self._window.switch_to()
+            pyglet.gl.glClearColor(*(channel / 255.0 for channel in background), 1.0)
+        self._window.push_handlers(on_mouse_press=self._on_mouse_press)
+        self._window.set_visible(True)
+
+    @property
+    def exit_requested(self) -> bool:
+        """Whether the user pressed Escape or closed the window."""
+        return self._window.has_exit
+
+    def window_point(self, x: float, y: float) -> Tuple[float, float]:
+        """Drawing position of a display pixel counted from the top-left corner."""
+        return x, self.height - y
+
+    def poll(self) -> None:
+        """Take in the window's pending input."""
+        self._window.dispatch_events()
+
+    def take_click(self) -> bool:
+        """Whether a left click arrived since the last call."""
+        clicked, self._clicked = self._clicked, False
+        return clicked
+
+    def present(self) -> None:
+        """Show the batch's current content, unless the last frame is more recent than the frame rate allows."""
+        now = time.perf_counter()
+        if now - self._last_frame < self._frame_interval:
+            return
+        self._last_frame = now
+        self._window.switch_to()
+        self._window.clear()
+        self.batch.draw()
+        self._window.flip()
+
+    def close(self) -> None:
+        """Remove the window from the screen."""
+        self._window.close()
+
+    def _on_mouse_press(self, x, y, button, modifiers):
+        if button == pyglet.window.mouse.LEFT:
+            self._clicked = True
+
+
+def _physical_size_mm() -> Tuple[int, int]:
+    if sys.platform != "win32":
+        return 0, 0
     user32 = ctypes.windll.user32
-    GWL_EXSTYLE = -20
-    WS_EX_LAYERED = 0x00080000
-    LWA_COLORKEY = 0x00000001
-
-    colorref = KEY_COLOR[0] | (KEY_COLOR[1] << 8) | (KEY_COLOR[2] << 16)
-    ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-    user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED)
-    user32.SetLayeredWindowAttributes(hwnd, colorref, 0, LWA_COLORKEY)
-
-
-def set_window_topmost(hwnd):
-    """Set the overlay window as always-on-top."""
-    if sys.platform != "win32" or not hwnd:
-        return
-    user32 = ctypes.windll.user32
-    HWND_TOPMOST = -1
-    SWP_NOMOVE = 0x0002
-    SWP_NOSIZE = 0x0001
-    SWP_SHOWWINDOW = 0x0040
-    SWP_NOACTIVATE = 0x0010
-    user32.SetWindowPos(
-        hwnd,
-        HWND_TOPMOST,
-        0,
-        0,
-        0,
-        0,
-        SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE,
-    )
-
-
-def set_window_click_through(hwnd):
-    """Set the overlay window to ignore mouse events."""
-    if sys.platform != "win32" or not hwnd:
-        return
-    user32 = ctypes.windll.user32
-    GWL_EXSTYLE = -20
-    WS_EX_LAYERED = 0x00080000
-    WS_EX_TRANSPARENT = 0x00000020
-    ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-    user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED | WS_EX_TRANSPARENT)
+    gdi32 = ctypes.windll.gdi32
+    HORZSIZE = 4
+    VERTSIZE = 6
+    hdc = user32.GetDC(0)
+    if not hdc:
+        return 0, 0
+    width_mm = int(gdi32.GetDeviceCaps(hdc, HORZSIZE))
+    height_mm = int(gdi32.GetDeviceCaps(hdc, VERTSIZE))
+    user32.ReleaseDC(0, hdc)
+    return max(width_mm, 0), max(height_mm, 0)
 
 
 def get_display_geo() -> Dict:
-    """Return primary display geometry including physical size in mm when available."""
-    if sys.platform == "win32":
-        user32 = ctypes.windll.user32
-        gdi32 = ctypes.windll.gdi32
-        width_px = int(user32.GetSystemMetrics(0))
-        height_px = int(user32.GetSystemMetrics(1))
-        HORZSIZE = 4
-        VERTSIZE = 6
-        hdc = user32.GetDC(0)
-        width_mm = int(gdi32.GetDeviceCaps(hdc, HORZSIZE)) if hdc else 0
-        height_mm = int(gdi32.GetDeviceCaps(hdc, VERTSIZE)) if hdc else 0
-        if hdc:
-            user32.ReleaseDC(0, hdc)
-        return {
-            "name": "Primary Display",
-            "x": 0,
-            "y": 0,
-            "width": width_px,
-            "height": height_px,
-            "width_mm": width_mm if width_mm > 0 else 0,
-            "height_mm": height_mm if height_mm > 0 else 0,
-        }
-    pygame.display.init()
-    sizes = pygame.display.get_desktop_sizes()
-    if sizes:
-        w, h = sizes[0]
-    else:
-        info = pygame.display.Info()
-        w, h = info.current_w, info.current_h
+    """Return primary display geometry, in the pixels overlay windows use, with its physical size in mm when known."""
+    screen = pyglet.display.get_display().get_default_screen()
+    width_mm, height_mm = _physical_size_mm()
     return {
-        "name": "Display",
-        "x": 0,
-        "y": 0,
-        "width": int(w),
-        "height": int(h),
-        "width_mm": 0,
-        "height_mm": 0,
+        "name": "Primary Display",
+        "x": int(screen.x),
+        "y": int(screen.y),
+        "width": int(screen.width),
+        "height": int(screen.height),
+        "width_mm": width_mm,
+        "height_mm": height_mm,
     }

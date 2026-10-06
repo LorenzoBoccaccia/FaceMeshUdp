@@ -16,7 +16,7 @@ dependencies = [
   "opencv-python>=4.10.0.84",
   "numpy>=1.26.0",
   "scipy>=1.11.0",
-  "pygame>=2.6.0"
+  "pyglet>=2.1"
 ]
 
 [project.optional-dependencies]

@@ -313,7 +313,6 @@ class OpenTrackForwardStep:
         self.enabled = enabled
         self._socket = None
 
-        # Initialize socket if enabled
         if self.enabled:
             self._create_socket()
 
@@ -325,7 +324,7 @@ class OpenTrackForwardStep:
         """Create UDP socket for sending data."""
         try:
             self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self._socket.setblocking(False)  # Non-blocking mode
+            self._socket.setblocking(False)
             logger.debug(f"UDP socket created for {self.host}:{self.port}")
         except Exception as e:
             logger.warning(f"Failed to create UDP socket: {e}")

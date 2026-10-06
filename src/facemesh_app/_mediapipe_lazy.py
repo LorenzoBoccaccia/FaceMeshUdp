@@ -1,15 +1,9 @@
-"""Monkey-patch mediapipe's FaceLandmarkerResult.from_ctypes for lazy landmarks.
+"""Make FaceLandmarker results cheap to build by reading landmarks straight from mediapipe's C result.
 
-Mediapipe eagerly builds 478 NormalizedLandmark dataclass instances per frame
-inside detect_for_video, even though our DAO touches ~12 specific indices.
-This module replaces that with a single C-side memcpy into a numpy (n, 3) array
-plus a list-like wrapper that materializes a NormalizedLandmark on indexing.
-
-Why: ~1 ms/frame of Python work disappears when the patch is active.
-
-Risk: tied to mediapipe's private C struct layout. We sanity-check the layout
-at patch time and refuse to install if the structure has shifted; callers can
-run the unpatched implementation as a fallback.
+Mediapipe builds a NormalizedLandmark object for each of the 478 landmarks of every frame, while the
+app reads only a few of them. The patched result holds all landmarks in one numpy array and builds a
+NormalizedLandmark only when one is indexed. The patch is installed only when mediapipe's C
+structures have the layout it reads; otherwise mediapipe's own result building stays in place.
 """
 
 from __future__ import annotations
@@ -48,8 +42,6 @@ def apply_lazy_landmarks_patch() -> bool:
 
     NLC = landmark_c_lib.NormalizedLandmarkC
 
-    # Layout sanity: the first three fields must be (x, y, z) as c_float at
-    # offsets 0/4/8 — otherwise the bulk-copy below silently reads garbage.
     expected_head = [("x", ctypes.c_float), ("y", ctypes.c_float), ("z", ctypes.c_float)]
     if list(NLC._fields_)[:3] != expected_head:
         logger.warning(
@@ -119,8 +111,6 @@ def apply_lazy_landmarks_patch() -> bool:
         xyz = np.empty((n, 3), dtype=np.float32)
         if n == 0:
             return xyz
-        # ctypes.string_at performs one C-level memcpy. The c_char_p `name`
-        # field is just bytes here — we never decode it.
         raw = ctypes.string_at(landmarks_c.landmarks, n * struct_size)
         view = np.frombuffer(raw, dtype=xyz_dtype, count=n)
         xyz[:, 0] = view["x"]
@@ -154,7 +144,6 @@ def apply_lazy_landmarks_patch() -> bool:
         return cls(face_landmarks, face_blendshapes, facial_transformation_matrixes)
 
     Result = face_landmarker.FaceLandmarkerResult
-    Result._unpatched_from_ctypes = Result.from_ctypes  # diagnostic / unpatch hook
     Result.from_ctypes = classmethod(_patched_from_ctypes)
     _PATCH_APPLIED = True
     logger.info("Mediapipe lazy-landmark patch applied (struct_size=%d).", struct_size)

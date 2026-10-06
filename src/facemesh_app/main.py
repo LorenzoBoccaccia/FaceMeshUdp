@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-FaceMesh Data Capture Application
-Main entry point for raw face mesh data capture.
+Command-line entry point: track the face, calibrate the gaze and forward it to OpenTrack or FreeTrack.
 """
 
 import argparse
@@ -42,7 +41,7 @@ def _env_int(key: str, default: str) -> int:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="FaceMesh data capture app")
+    parser = argparse.ArgumentParser(description="Webcam eye and head tracking for OpenTrack and FreeTrack")
 
     parser.add_argument(
         "--overlay",

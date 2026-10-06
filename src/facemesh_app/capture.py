@@ -1,6 +1,5 @@
 """
-Capture module for FaceMesh application.
-Handles mesh data capture, screenshot generation, and test data saving.
+Save snapshots of the camera frame and its face measurements for offline inspection.
 """
 
 import json
@@ -31,11 +30,8 @@ from .facemesh_dao import (
 )
 
 
-# Constants
 CAPTURE_DIR = Path("captures")
 FACE_MESH_CONNECTIONS = list(vision.FaceLandmarksConnections.FACE_LANDMARKS_TESSELATION)
-
-# Colors
 WHITE = (255, 255, 255)
 RED = (0, 0, 255)
 GREEN = (80, 230, 120)
@@ -74,7 +70,7 @@ def _fmt_num(value: Any, precision: int = 3) -> str:
     if value is None:
         return "n/a"
     v = safe_float(value, float("nan"))
-    if v != v:  # NaN
+    if math.isnan(v):
         return "n/a"
     return f"{v:.{precision}f}"
 
@@ -243,7 +239,12 @@ def build_camera_capture_marked_image(
     draw_click: bool = True,
     draw_info_panel: bool = True,
 ) -> Tuple[Optional[np.ndarray], Optional[str]]:
-    """Build marked camera frame with face mesh, ovals, and vectors."""
+    """Draw the face measurements over the mirrored camera frame for visual inspection.
+
+    Shows the mesh, the iris centres, each eye's corner-to-corner axis with the iris offset along
+    it, the nose bridge-to-base line with its perpendicular and each iris' drop onto it, and the
+    clicked point.
+    """
     frame = snap.get("frame")
     if frame is None:
         return None, "No camera frame available yet."
@@ -254,7 +255,6 @@ def build_camera_capture_marked_image(
     landmarks = snap.get("landmarks") or []
     snap_evt = snap.get("evt")
 
-    # Draw mesh connections first, then points for clarity.
     if landmarks:
         for conn in FACE_MESH_CONNECTIONS:
             a = int(conn.start)
@@ -275,7 +275,6 @@ def build_camera_capture_marked_image(
                 cv2.LINE_AA,
             )
 
-    # Draw explicit eye geometry from raw landmarks.
     left_iris_ring = _lm_points_px(
         landmarks, LEFT_IRIS_RING_IDXS, fw, fh, mirror_x=mirror_view
     )
@@ -302,7 +301,6 @@ def build_camera_capture_marked_image(
         cv2.circle(img, right_center, 5, WHITE, -1, cv2.LINE_AA)
         cv2.circle(img, right_center, 3, MAGENTA, -1, cv2.LINE_AA)
 
-    # Canthus points + eye axis used for lateral iris distance.
     def _draw_canthus_axis(inner_idx: int, outer_idx: int, iris_center, color):
         if inner_idx >= len(landmarks) or outer_idx >= len(landmarks):
             return
@@ -331,9 +329,6 @@ def build_camera_capture_marked_image(
             int(round(inner_px[0] + t * ux)),
             int(round(inner_px[1] + t * uy)),
         )
-        # Iris -> inner canthus, parallel to inner->outer canthus axis
-        # (drop iris perpendicularly onto the eye axis, then walk along
-        # the axis back to the inner canthus -- the lateral distance segment).
         iris_px = (int(round(ix)), int(round(iy)))
         cv2.line(img, iris_px, foot, WHITE, 2, cv2.LINE_AA)
         cv2.line(img, iris_px, foot, color, 1, cv2.LINE_AA)
@@ -344,8 +339,6 @@ def build_camera_capture_marked_image(
     _draw_canthus_axis(LEFT_EYE_INNER_IDX, LEFT_EYE_OUTER_IDX, left_center, ORANGE)
     _draw_canthus_axis(RIGHT_EYE_INNER_IDX, RIGHT_EYE_OUTER_IDX, right_center, CYAN)
 
-    # Nose T: bridge->base axis (vertical reference for eye pitch) and
-    # the perpendicular at the bridge (horizontal eye-span direction).
     nose_bridge_px = (
         _lm_to_px(landmarks[NOSE_BRIDGE_IDX], fw, fh, mirror_x=mirror_view)
         if NOSE_BRIDGE_IDX < len(landmarks)
@@ -388,8 +381,6 @@ def build_camera_capture_marked_image(
             cv2.line(img, p1, p2, WHITE, 4, cv2.LINE_AA)
             cv2.line(img, p1, p2, GREEN, 2, cv2.LINE_AA)
 
-            # Iris -> bridge-perpendicular line, perpendicular drop
-            # (vertical-distance segment from iris to the nose T crossbar).
             def _drop_to_bridge_perp(iris_center, color):
                 if iris_center is None:
                     return
@@ -412,7 +403,6 @@ def build_camera_capture_marked_image(
         cv2.circle(img, nose_base_px, 6, WHITE, -1, cv2.LINE_AA)
         cv2.circle(img, nose_base_px, 4, YELLOW, -1, cv2.LINE_AA)
 
-    # Click marker mapped from overlay-space to frame-space.
     cx = int(
         clamp(round((float(click_pos[0]) / max(1.0, float(overlay_w))) * fw), 0, fw - 1)
     )

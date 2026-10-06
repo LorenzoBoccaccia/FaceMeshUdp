@@ -7,9 +7,7 @@ Captures raw FaceMesh data for specific head and eye movements to analyze coordi
 import argparse
 import json
 import math
-import os
 import sys
-import threading
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -218,78 +216,6 @@ def serialize_mediapipe_result(result) -> Dict[str, Any]:
                 ]
         except (AttributeError, TypeError, ValueError) as e:
             print(f"Error serializing blendshapes: {e}")
-        return None
-        try:
-            # MediaPipe face_landmarks is a list of NormalizedLandmarkList
-            if hasattr(landmarks, "__iter__") and not isinstance(
-                landmarks, (str, bytes)
-            ):
-                result = []
-                for lm in landmarks:
-                    # Each landmark should have x, y, z properties
-                    # Use safe_float to handle None values
-                    x_val = getattr(lm, "x", None) if hasattr(lm, "x") else None
-                    y_val = getattr(lm, "y", None) if hasattr(lm, "y") else None
-                    z_val = getattr(lm, "z", None) if hasattr(lm, "z") else None
-
-                    lm_data = {
-                        "x": safe_float(x_val) if x_val is not None else None,
-                        "y": safe_float(y_val) if y_val is not None else None,
-                        "z": safe_float(z_val) if z_val is not None else None,
-                    }
-                    # Optional fields that may not exist in face landmarks
-                    if hasattr(lm, "visibility"):
-                        v_val = getattr(lm, "visibility", None)
-                        lm_data["visibility"] = (
-                            safe_float(v_val) if v_val is not None else None
-                        )
-                    if hasattr(lm, "presence"):
-                        p_val = getattr(lm, "presence", None)
-                        lm_data["presence"] = (
-                            safe_float(p_val) if p_val is not None else None
-                        )
-                    result.append(lm_data)
-                return result
-        except Exception as e:
-            print(f"Error serializing landmarks: {e}")
-        return None
-
-    def serialize_matrix(matrix):
-        if matrix is None:
-            return None
-        try:
-            if hasattr(matrix, "flatten"):
-                return [float(x) for x in matrix.flatten()]
-            elif hasattr(matrix, "__iter__"):
-                flat = []
-                for row in matrix:
-                    if hasattr(row, "__iter__"):
-                        flat.extend([float(x) for x in row])
-                    else:
-                        flat.append(float(row))
-                return flat
-        except Exception:
-            pass
-        return None
-
-    def serialize_blendshapes(blendshapes):
-        if blendshapes is None:
-            return None
-        try:
-            if hasattr(blendshapes, "__iter__") and not isinstance(
-                blendshapes, (str, bytes)
-            ):
-                return [
-                    {
-                        "category": str(bs.category)
-                        if hasattr(bs, "category")
-                        else None,
-                        "score": float(bs.score) if hasattr(bs, "score") else None,
-                    }
-                    for bs in blendshapes
-                ]
-        except Exception:
-            pass
         return None
 
     data = {}

@@ -78,8 +78,8 @@ FreeTrack:
 
 Misc:
 
-- `--smooth MS` — forward the median gaze of the last MS milliseconds (default 0, raw); a held gaze always settles on its calibrated direction, so the view centre does not drift
-- `--smooth-reset MS` — when the gaze jumps to a new fixation, keep only the last MS milliseconds of the previous one in the average (default off)
+- `--smooth MS` — forward the mean gaze of the last MS milliseconds (default 0, raw); a held gaze always settles on its calibrated direction, so the view centre does not drift
+- `--smooth-reset MS` — when the gaze jumps to a new fixation, blank the previous fixation's samples older than its last MS milliseconds; the window keeps its length and refills with new frames, so the view eases over instead of snapping (default off)
 - `--smooth-threshold SIGMA` — distance from the current fixation, in multiples of the eye noise measured during calibration, that counts as a jump (default 3)
 
 Blinks are ignored: while the eyelids close and reopen (detected from the eye opening, against a threshold set from your calibration) no gaze is forwarded and the last view is held.

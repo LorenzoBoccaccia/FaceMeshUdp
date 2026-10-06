@@ -90,11 +90,14 @@ level until the lid is back to 95% of its pre-blink opening, or has stopped reop
 the blink level (a blink that ends in a downward look settles narrower). Iris readings in
 between are lid artefacts, worth up to 30° of false downward gaze.
 
-`GazeSmoothingStep` forwards the median gaze of the trailing window. A sample further than
-`--smooth-threshold` times the eye noise from the current fixation, confirmed by the next one,
-starts a new fixation and keeps only a short tail of the previous one. The output is a pure
-function of the absolute samples in the window, so a held gaze settles on its calibrated
-direction and the view centre cannot drift.
+`GazeSmoothingStep` forwards the mean of the valid samples in the trailing window. A sample
+further than `--smooth-threshold` times the eye noise from the current fixation's median,
+confirmed by the next one, starts a new fixation. The fixation being left is blanked in place
+except for its last `--smooth-reset` milliseconds of samples (counted back from its last
+sample, so a blink gap cannot empty the tail); leftovers of earlier fixations age out on their
+own. The window keeps its length and refills with new frames, so the view eases into the new
+fixation without a snap. The output is a pure function of the absolute samples in the window,
+so a held gaze settles on its calibrated direction and the view centre cannot drift.
 
 For each frame, `GazeModel.project` builds the gaze ray from the eye position, intersects
 it with the screen plane, and reports:

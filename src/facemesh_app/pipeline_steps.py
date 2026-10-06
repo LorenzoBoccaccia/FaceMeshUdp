@@ -146,14 +146,16 @@ class GazeDirection:
 
 
 class GazeSmoothingStep:
-    """Pipeline step: Steady the calibrated gaze with the mean of a trailing time window.
+    """Pipeline step: Steady the calibrated gaze with the mean of a trailing window of observed gaze.
 
     Movement within the threshold, measured against the calibrated eye noise, is treated as
     fixation jitter and averaged away. When the gaze leaves the current fixation for good, the
-    previous fixation's samples older than a short tail are blanked in place: the window keeps
-    its length and refills with new frames, so the view eases into the new fixation instead of
-    snapping. The output depends only on the samples inside the window, so a held gaze always
-    settles on its calibrated absolute direction no matter how fast or slow it got there.
+    earlier content of the window is kept only as its average, weighted as a short tail, and the
+    window refills with new frames: the view moves from where it is straight toward the new
+    fixation, without snapping and without turning back toward older fixations. Frames without a
+    gaze reading, such as blinks, do not age the window, so the view resumes where it stopped.
+    A held gaze settles exactly on its calibrated absolute direction within one window, so the
+    view centre cannot drift.
     """
 
     def __init__(
@@ -165,8 +167,10 @@ class GazeSmoothingStep:
         """Initialize gaze smoothing step.
 
         Args:
-            window_ms: Length of the averaging window in milliseconds; 0 forwards the gaze raw
-            reset_window_ms: Tail of the previous fixation kept after a jump; None disables jumps
+            window_ms: Length of the averaging window in milliseconds of observed gaze;
+                0 forwards the gaze raw
+            reset_window_ms: Weight, in milliseconds, the earlier average keeps after a jump;
+                None disables jumps
             reset_threshold_sigma: Distance from the current fixation, in multiples of the
                 calibrated eye noise, that counts as leaving it
         """
@@ -175,7 +179,9 @@ class GazeSmoothingStep:
         self.reset_threshold_sigma = reset_threshold_sigma
         self.jump_count = 0
         self._samples: Deque[List[float]] = deque()
-        self._fixation_ts = 0
+        self._observed_ms = 0
+        self._last_frame_ts: Optional[int] = None
+        self._fixation_start = 0
         self._candidate: Optional[List[float]] = None
 
         logger.debug(
@@ -183,14 +189,19 @@ class GazeSmoothingStep:
             f"reset_window_ms={reset_window_ms}, reset_threshold_sigma={reset_threshold_sigma}"
         )
 
-    def _trim(self, ts: int) -> None:
-        while self._samples and self._samples[0][0] <= ts - self.window_ms:
+    def _frame_interval(self, face_mesh_event: Optional[FaceMeshEvent]) -> int:
+        if face_mesh_event is None:
+            return 0
+        previous, self._last_frame_ts = self._last_frame_ts, face_mesh_event.ts
+        return 0 if previous is None else face_mesh_event.ts - previous
+
+    def _trim(self) -> None:
+        while self._samples and self._samples[0][0] <= self._observed_ms - self.window_ms:
             self._samples.popleft()
 
     @staticmethod
     def _gazes(samples) -> np.ndarray:
-        values = np.array([sample[1:] for sample in samples], dtype=float).reshape(-1, 2)
-        return values[~np.isnan(values[:, 0])]
+        return np.array([sample[1:] for sample in samples], dtype=float).reshape(-1, 2)
 
     @staticmethod
     def _distance(a, b, noise: Tuple[float, float]) -> float:
@@ -205,24 +216,24 @@ class GazeSmoothingStep:
             self._samples.pop()
         self._candidate = None
 
-    def _start_fixation(self, ts: int) -> None:
-        left_since = self._fixation_ts
-        self._fixation_ts = ts
-        left = [
-            s[0] for s in self._samples if left_since <= s[0] < ts and not math.isnan(s[1])
-        ]
-        if not left:
+    def _start_fixation(self, start: int) -> None:
+        self._fixation_start = start
+        earlier = [sample for sample in self._samples if sample[0] < start]
+        if not earlier:
             return
-        last = left[-1]
-        for sample in self._samples:
-            if sample[0] >= left_since and last - sample[0] >= self.reset_window_ms:
-                sample[1] = sample[2] = math.nan
+        view = self._gazes(earlier).mean(axis=0).tolist()
+        tail = [
+            [sample[0], *view]
+            for sample in earlier
+            if sample[0] >= start - self.reset_window_ms
+        ]
+        self._samples = deque(tail + [sample for sample in self._samples if sample[0] >= start])
 
     def _accept(self, sample: List[float], noise: Tuple[float, float]) -> None:
         fixation = self._gazes(
             entry
             for entry in self._samples
-            if entry[0] >= self._fixation_ts and entry is not self._candidate
+            if entry[0] >= self._fixation_start and entry is not self._candidate
         )
         if not len(fixation):
             self._drop_candidate()
@@ -256,8 +267,9 @@ class GazeSmoothingStep:
             calibrated_event: Calibrated face and gaze data (optional)
 
         Returns:
-            Mean gaze over the window's valid samples, or None when the frame has no calibrated gaze
+            Mean gaze over the window, or None when the frame has no calibrated gaze
         """
+        interval = self._frame_interval(face_mesh_event)
         if calibrated_event is None:
             self._drop_candidate()
             return None
@@ -268,13 +280,13 @@ class GazeSmoothingStep:
         if self.window_ms <= 0:
             return GazeDirection(yaw=yaw, pitch=pitch)
 
-        ts = calibrated_event.face_mesh_event.ts
-        sample = [ts, yaw, pitch]
-        self._trim(ts)
+        self._observed_ms += interval
+        sample = [self._observed_ms, yaw, pitch]
         if self.reset_window_ms is None:
             self._samples.append(sample)
         else:
             self._accept(sample, calibrated_event.model.eye_noise_deg)
+        self._trim()
 
         mean_yaw, mean_pitch = self._gazes(self._samples).mean(axis=0)
         return GazeDirection(yaw=float(mean_yaw), pitch=float(mean_pitch))

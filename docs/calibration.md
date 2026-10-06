@@ -24,13 +24,18 @@ distance, which the user measures once (`--viewing-distance`, default 100 cm).
 
 ## Nine-point procedure
 
-Each target shows a red dot (where the nose aims) and a green dot (where the eyes look),
-mirrored through the screen centre. At `C` both coincide at the centre and the user faces it
-with head and eyes aligned. Click, hold still through the blink, and the capture window
-records the frames. A target whose capture window saw no usable face is asked again.
+Each target shows a green dot near a screen edge or corner (where the eyes look) and a red
+dot half-way from the centre toward the opposite side (where the nose aims). Head and eyes
+therefore turn in opposite directions while the eyes stay within about 10–20° of straight
+ahead, where MediaPipe's iris landmarks still behave. At `C` both dots coincide at the
+centre and the user faces it with head and eyes aligned, held for 5 s so the eye noise can
+be measured over seconds, not just across a few frames. Click, hold still through the blink,
+and the capture window records the frames. A target whose capture window saw no
+usable face is asked again.
 
-Each `CalibrationPoint` keeps the per-axis median raw eye reading, the median eye position
-and the chordal mean head rotation of its frames.
+Each `CalibrationPoint` drops its blink frames (eye opening below 85% of the capture's
+median) and keeps the per-axis median raw eye reading and its robust spread, the median eye
+position, the median eye opening, and the chordal mean head rotation of the rest.
 
 ## Model
 
@@ -70,7 +75,26 @@ A wrong distance scales the eye contribution relative to the head (10% off gives
 The profile file stores the measured points, the screen and the distance; the model is
 refitted at every start, so `--viewing-distance` can be corrected without recalibrating.
 
+The fit also derives two per-user levels from the points:
+
+- **eye noise**: the spread of the raw eye reading over the 5 s centre hold, carried through
+  `W`, in degrees per axis; the smoother measures jumps against it. Short holds understate it,
+  because the reading wanders slowly;
+- **blink level**: 85% of the narrowest eye opening seen at any target (looking down narrows
+  the eyes), below which the eyes count as closing.
+
 ## Runtime
+
+`BlinkRejectionStep` withholds gaze from the moment the eye opening drops below the blink
+level until the lid is back to 95% of its pre-blink opening, or has stopped reopening above
+the blink level (a blink that ends in a downward look settles narrower). Iris readings in
+between are lid artefacts, worth up to 30° of false downward gaze.
+
+`GazeSmoothingStep` forwards the median gaze of the trailing window. A sample further than
+`--smooth-threshold` times the eye noise from the current fixation, confirmed by the next one,
+starts a new fixation and keeps only a short tail of the previous one. The output is a pure
+function of the absolute samples in the window, so a held gaze settles on its calibrated
+direction and the view centre cannot drift.
 
 For each frame, `GazeModel.project` builds the gaze ray from the eye position, intersects
 it with the screen plane, and reports:

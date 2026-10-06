@@ -15,7 +15,7 @@ pip install -e ".[dev]"
 ## Calibrate and run
 
 `calibrate.bat` records the `default` profile into `calibration-default.json`, `start.bat`
-loads it and publishes to games over FreeTrack (TrackIR interface, 500 ms gaze smoothing, 200 ms tail kept on gaze jumps beyond 5 degrees). Both run from the repository root, use `.venv`, and pass any
+loads it and publishes to games over FreeTrack (TrackIR interface, gaze multiplier 1.5, 500 ms gaze smoothing, 200 ms tail kept on gaze jumps beyond 3x your calibrated eye noise). Both run from the repository root, use `.venv`, and pass any
 extra arguments through to the app (`start.bat --camera-index 1`).
 
 Measure the distance from your eyes to the screen and pass it to calibration, e.g.
@@ -78,9 +78,11 @@ FreeTrack:
 
 Misc:
 
-- `--smooth MS` — average the forwarded gaze over the last MS milliseconds (default 0, raw)
+- `--smooth MS` — forward the median gaze of the last MS milliseconds (default 0, raw); a held gaze always settles on its calibrated direction, so the view centre does not drift
 - `--smooth-reset MS` — when the gaze jumps to a new fixation, keep only the last MS milliseconds of the previous one in the average (default off)
-- `--smooth-threshold DEG` — distance from the current fixation, just above fixation jitter, that counts as a jump (default 1)
+- `--smooth-threshold SIGMA` — distance from the current fixation, in multiples of the eye noise measured during calibration, that counts as a jump (default 3)
+
+Blinks are ignored: while the eyelids close and reopen (detected from the eye opening, against a threshold set from your calibration) no gaze is forwarded and the last view is held.
 - `--overlay-fps FPS` — overlay redraw rate (default 60)
 - `--log-interval SECONDS` — periodic stats interval (default 2.0)
 - `--quiet` — suppress console output

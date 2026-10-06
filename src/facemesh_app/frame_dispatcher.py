@@ -63,6 +63,7 @@ class FrameDispatcher:
         state_machine=None,
         face_mesh_step=None,
         calibration_adapter_step=None,
+        blink_rejection_step=None,
         gaze_smoothing_step=None,
         opentrack_forward_step=None,
         freetrack_forward_step=None,
@@ -72,6 +73,7 @@ class FrameDispatcher:
         self.state_machine = state_machine
         self.face_mesh_step = face_mesh_step
         self.calibration_adapter_step = calibration_adapter_step
+        self.blink_rejection_step = blink_rejection_step
         self.gaze_smoothing_step = gaze_smoothing_step
         self.opentrack_forward_step = opentrack_forward_step
         self.freetrack_forward_step = freetrack_forward_step
@@ -111,6 +113,8 @@ class FrameDispatcher:
         calibrated_evt = None
         if self.calibration_adapter_step is not None:
             calibrated_evt = self.calibration_adapter_step.receive_frame(frame, evt)
+        if self.blink_rejection_step is not None:
+            calibrated_evt = self.blink_rejection_step.receive_frame(frame, evt, calibrated_evt)
 
         pipeline_frame = frame
         if not run_downstream:

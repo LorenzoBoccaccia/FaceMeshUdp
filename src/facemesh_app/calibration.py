@@ -18,11 +18,13 @@ from .facemesh_dao import FaceMeshEvent, clamp
 
 logger = logging.getLogger(__name__)
 
-CALIBRATION_MODEL_VERSION = 11
+CALIBRATION_MODEL_VERSION = 12
 DEFAULT_VIEWING_DISTANCE_MM = 1000.0
 REFERENCE_POINT = "C"
 POINT_NAMES = ("C", "T", "TL", "L", "BL", "B", "BR", "R", "TR")
 MAX_SCREEN_ANGLE_DEG = 30.0
+BLINK_OPENING_RATIO = 0.85
+ROBUST_SD = 1.4826
 
 PERSON_AXES = np.diag([-1.0, 1.0, -1.0])
 
@@ -56,6 +58,7 @@ def has_gaze_inputs(event: Optional[FaceMeshEvent]) -> bool:
         and event.eye_position is not None
         and event.combined_eye_gaze_yaw is not None
         and event.combined_eye_gaze_pitch is not None
+        and event.eye_opening is not None
     )
 
 
@@ -121,6 +124,8 @@ class CalibrationPoint:
     raw_eye: Tuple[float, float]
     head_rotation: Tuple[Tuple[float, float, float], ...]
     eye_position_mm: Tuple[float, float, float]
+    eye_opening: float
+    raw_eye_spread: Tuple[float, float]
     sample_count: int
 
     @classmethod
@@ -131,14 +136,17 @@ class CalibrationPoint:
         eye_target_px: Tuple[float, float],
         events: Sequence[FaceMeshEvent],
     ) -> Optional["CalibrationPoint"]:
-        """Robust summary of the frames captured for one target; None when no frame was usable."""
-        usable = [event for event in events if has_gaze_inputs(event)]
-        if not usable:
+        """Robust summary of the open-eye frames captured for one target; None when none was usable."""
+        measured = [event for event in events if has_gaze_inputs(event)]
+        if not measured:
             return None
-        raw_eye = np.median(
-            [[e.combined_eye_gaze_yaw, e.combined_eye_gaze_pitch] for e in usable],
-            axis=0,
+        typical_opening = float(np.median([e.eye_opening for e in measured]))
+        usable = [e for e in measured if e.eye_opening >= BLINK_OPENING_RATIO * typical_opening]
+        readings = np.array(
+            [[e.combined_eye_gaze_yaw, e.combined_eye_gaze_pitch] for e in usable]
         )
+        raw_eye = np.median(readings, axis=0)
+        spread = ROBUST_SD * np.median(np.abs(readings - raw_eye), axis=0)
         eye_position = np.median([e.eye_position for e in usable], axis=0)
         u, _, vt = np.linalg.svd(np.mean([e.head_rotation for e in usable], axis=0))
         rotation = u @ np.diag([1.0, 1.0, np.linalg.det(u @ vt)]) @ vt
@@ -149,6 +157,8 @@ class CalibrationPoint:
             raw_eye=(float(raw_eye[0]), float(raw_eye[1])),
             head_rotation=tuple(tuple(float(v) for v in row) for row in rotation),
             eye_position_mm=tuple(float(v) for v in eye_position),
+            eye_opening=float(np.median([e.eye_opening for e in usable])),
+            raw_eye_spread=(float(spread[0]), float(spread[1])),
             sample_count=len(usable),
         )
 
@@ -172,6 +182,8 @@ class CalibrationPoint:
             "rawEye": list(self.raw_eye),
             "headRotation": [list(row) for row in self.head_rotation],
             "eyePositionMm": list(self.eye_position_mm),
+            "eyeOpening": self.eye_opening,
+            "rawEyeSpread": list(self.raw_eye_spread),
             "sampleCount": self.sample_count,
         }
 
@@ -184,6 +196,8 @@ class CalibrationPoint:
             raw_eye=tuple(data["rawEye"]),
             head_rotation=tuple(tuple(row) for row in data["headRotation"]),
             eye_position_mm=tuple(data["eyePositionMm"]),
+            eye_opening=float(data["eyeOpening"]),
+            raw_eye_spread=tuple(data["rawEyeSpread"]),
             sample_count=int(data["sampleCount"]),
         )
 
@@ -236,6 +250,8 @@ class GazeModel:
     head_aim_gain: Tuple[float, float]
     eye_residual_deg: float
     head_residual_deg: float
+    eye_noise_deg: Tuple[float, float]
+    blink_opening: float
 
     @cached_property
     def _reference_axes(self) -> np.ndarray:
@@ -321,6 +337,8 @@ class GazeModel:
             "headAimGain": list(self.head_aim_gain),
             "eyeResidualDeg": self.eye_residual_deg,
             "headResidualDeg": self.head_residual_deg,
+            "eyeNoiseDeg": list(self.eye_noise_deg),
+            "blinkOpening": self.blink_opening,
             "screen": self.screen.to_dict(),
             "reference": self.reference.to_dict(),
         }
@@ -332,7 +350,9 @@ class GazeModel:
             f"screen roll {self.screen_roll_deg:+.1f} deg tilt {self.screen_tilt_deg:+.1f} deg, "
             f"eye matrix [[{a:.3f} {b:+.3f}] [{c:+.3f} {d:.3f}]], "
             f"head aim gain ({self.head_aim_gain[0]:.2f}, {self.head_aim_gain[1]:.2f}), "
-            f"fit residual eye {self.eye_residual_deg:.2f} deg head {self.head_residual_deg:.2f} deg"
+            f"fit residual eye {self.eye_residual_deg:.2f} deg head {self.head_residual_deg:.2f} deg, "
+            f"eye noise ({self.eye_noise_deg[0]:.2f}, {self.eye_noise_deg[1]:.2f}) deg, "
+            f"blink below eye opening {self.blink_opening:.3f}"
         )
 
 
@@ -393,6 +413,7 @@ def fit_gaze_model(
     )
     final = residuals(result.x).reshape(-1, 2, 2)
     eye_matrix = result.x[2:6].reshape(2, 2)
+    eye_noise = np.sqrt(eye_matrix**2 @ np.array(reference.raw_eye_spread) ** 2)
     return GazeModel(
         screen=screen,
         viewing_distance_mm=float(viewing_distance_mm),
@@ -403,6 +424,8 @@ def fit_gaze_model(
         head_aim_gain=(float(result.x[6]), float(result.x[7])),
         eye_residual_deg=float(np.sqrt(np.mean(final[:, 0] ** 2))),
         head_residual_deg=float(np.sqrt(np.mean(final[:, 1] ** 2))),
+        eye_noise_deg=(float(eye_noise[0]), float(eye_noise[1])),
+        blink_opening=BLINK_OPENING_RATIO * min(p.eye_opening for p in points),
     )
 
 

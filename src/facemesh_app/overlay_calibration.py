@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 
 import pygame
 
-from .calibration import CalibrationPoint
+from .calibration import REFERENCE_POINT, CalibrationPoint
 from .facemesh_dao import FaceMeshEvent
 from .overlay_common import (
     BLACK,
@@ -24,6 +24,7 @@ from .overlay_common import (
 CALIB_INSET = 50
 CALIB_BLINK_MS = 500
 CALIB_CAPTURE_MS = 500
+CALIB_REFERENCE_CAPTURE_MS = 5000
 CALIB_BLINK_PERIOD_MS = 120
 
 
@@ -158,7 +159,12 @@ class CalibrationOverlayManager:
         elif self._calib_phase == "capture":
             if evt is not None:
                 self._calib_samples.append(evt)
-            if elapsed_ms >= CALIB_CAPTURE_MS:
+            capture_ms = (
+                CALIB_REFERENCE_CAPTURE_MS
+                if current_point["name"] == REFERENCE_POINT
+                else CALIB_CAPTURE_MS
+            )
+            if elapsed_ms >= capture_ms:
                 calib_point = CalibrationPoint.from_samples(
                     current_point["name"],
                     (current_point["nose_x"], current_point["nose_y"]),
@@ -251,6 +257,9 @@ class CalibrationOverlayManager:
         br = (w - inset, h - inset)
         bl = (inset, h - inset)
 
+        def toward(point):
+            return ((center_x + point[0]) / 2, (center_y + point[1]) / 2)
+
         click_instruction = (
             "Turn your HEAD so your nose points at the RED dot.\n"
             "Keep your EYES fixed on the GREEN dot (do not move your head to follow it)."
@@ -265,69 +274,69 @@ class CalibrationOverlayManager:
                 "eye_y": center_y,
                 "instruction": (
                     "Face the screen squarely and look at the CENTRE dot.\n"
-                    "Keep your head and eyes aligned straight ahead."
+                    "Keep your head and eyes aligned straight ahead; this one is held for 5 seconds."
                 ),
             },
             {
                 "name": "T",
-                "nose_x": t[0],
-                "nose_y": t[1],
+                "nose_x": toward(t)[0],
+                "nose_y": toward(t)[1],
                 "eye_x": b[0],
                 "eye_y": b[1],
                 "instruction": click_instruction,
             },
             {
                 "name": "TL",
-                "nose_x": tl[0],
-                "nose_y": tl[1],
+                "nose_x": toward(tl)[0],
+                "nose_y": toward(tl)[1],
                 "eye_x": br[0],
                 "eye_y": br[1],
                 "instruction": click_instruction,
             },
             {
                 "name": "L",
-                "nose_x": l[0],
-                "nose_y": l[1],
+                "nose_x": toward(l)[0],
+                "nose_y": toward(l)[1],
                 "eye_x": r[0],
                 "eye_y": r[1],
                 "instruction": click_instruction,
             },
             {
                 "name": "BL",
-                "nose_x": bl[0],
-                "nose_y": bl[1],
+                "nose_x": toward(bl)[0],
+                "nose_y": toward(bl)[1],
                 "eye_x": tr[0],
                 "eye_y": tr[1],
                 "instruction": click_instruction,
             },
             {
                 "name": "B",
-                "nose_x": b[0],
-                "nose_y": b[1],
+                "nose_x": toward(b)[0],
+                "nose_y": toward(b)[1],
                 "eye_x": t[0],
                 "eye_y": t[1],
                 "instruction": click_instruction,
             },
             {
                 "name": "BR",
-                "nose_x": br[0],
-                "nose_y": br[1],
+                "nose_x": toward(br)[0],
+                "nose_y": toward(br)[1],
                 "eye_x": tl[0],
                 "eye_y": tl[1],
                 "instruction": click_instruction,
             },
             {
                 "name": "R",
-                "nose_x": r[0],
-                "nose_y": r[1],
+                "nose_x": toward(r)[0],
+                "nose_y": toward(r)[1],
                 "eye_x": l[0],
                 "eye_y": l[1],
                 "instruction": click_instruction,
             },
             {
                 "name": "TR",
-                "nose_x": tr[0],
-                "nose_y": tr[1],
+                "nose_x": toward(tr)[0],
+                "nose_y": toward(tr)[1],
                 "eye_x": bl[0],
                 "eye_y": bl[1],
                 "instruction": click_instruction,

@@ -9,7 +9,7 @@ import socket
 import struct
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Optional, Tuple
+from typing import Deque, List, Optional, Tuple
 
 import cv2
 import mediapipe as mp
@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 BLINK_RECOVERY_RATIO = 0.95
 EYE_OPENING_SETTLED = 0.005
+OPEN_WIDTH_FRAMES = 10
 
 
 class FaceMeshStep:
@@ -96,13 +97,14 @@ class BlinkRejectionStep:
     """Pipeline step: Withhold gaze while the eyelids close and reopen, when the iris reading is not gaze.
 
     A blink starts when the eye opening falls below the calibrated blink level and lasts until
-    the lid is back near its open width, or has stopped reopening, which happens lower when
-    the user looks down.
+    the lid is back near its open width before the blink, or has stopped reopening, which
+    happens lower when the user looks down. The open width is the widest of the last open
+    frames, so the closing lid cannot lower it.
     """
 
     def __init__(self):
         self._blinking = False
-        self._open_opening: Optional[float] = None
+        self._open_openings: Deque[float] = deque(maxlen=OPEN_WIDTH_FRAMES)
         self._previous_opening: Optional[float] = None
 
     def receive_frame(
@@ -119,9 +121,8 @@ class BlinkRejectionStep:
         previous = self._previous_opening
         self._previous_opening = opening
         if self._blinking:
-            reopened = (
-                self._open_opening is not None
-                and opening >= BLINK_RECOVERY_RATIO * self._open_opening
+            reopened = bool(self._open_openings) and (
+                opening >= BLINK_RECOVERY_RATIO * max(self._open_openings)
             )
             settled = (
                 opening >= blink_level
@@ -132,7 +133,7 @@ class BlinkRejectionStep:
         elif opening < blink_level:
             self._blinking = True
         else:
-            self._open_opening = opening
+            self._open_openings.append(opening)
         return None if self._blinking else calibrated_event
 
 
@@ -145,14 +146,14 @@ class GazeDirection:
 
 
 class GazeSmoothingStep:
-    """Pipeline step: Steady the calibrated gaze with the median of a trailing time window.
+    """Pipeline step: Steady the calibrated gaze with the mean of a trailing time window.
 
     Movement within the threshold, measured against the calibrated eye noise, is treated as
-    fixation jitter and smoothed away. When the gaze leaves the current fixation for good, only
-    a short tail of the previous fixation is kept, so the view moves to the new fixation
-    promptly while still easing into it. The output depends only on the samples inside the
-    window, so a held gaze always settles on its calibrated absolute direction no matter how
-    fast or slow it got there, and short outliers cannot pull it.
+    fixation jitter and averaged away. When the gaze leaves the current fixation for good, the
+    previous fixation's samples older than a short tail are blanked in place: the window keeps
+    its length and refills with new frames, so the view eases into the new fixation instead of
+    snapping. The output depends only on the samples inside the window, so a held gaze always
+    settles on its calibrated absolute direction no matter how fast or slow it got there.
     """
 
     def __init__(
@@ -164,7 +165,7 @@ class GazeSmoothingStep:
         """Initialize gaze smoothing step.
 
         Args:
-            window_ms: Length of the smoothing window in milliseconds; 0 forwards the gaze raw
+            window_ms: Length of the averaging window in milliseconds; 0 forwards the gaze raw
             reset_window_ms: Tail of the previous fixation kept after a jump; None disables jumps
             reset_threshold_sigma: Distance from the current fixation, in multiples of the
                 calibrated eye noise, that counts as leaving it
@@ -173,9 +174,9 @@ class GazeSmoothingStep:
         self.reset_window_ms = reset_window_ms
         self.reset_threshold_sigma = reset_threshold_sigma
         self.jump_count = 0
-        self._samples: Deque[Tuple[int, float, float]] = deque()
+        self._samples: Deque[List[float]] = deque()
         self._fixation_ts = 0
-        self._candidate: Optional[Tuple[int, float, float]] = None
+        self._candidate: Optional[List[float]] = None
 
         logger.debug(
             f"GazeSmoothingStep initialized: window_ms={window_ms}, "
@@ -183,63 +184,62 @@ class GazeSmoothingStep:
         )
 
     def _trim(self, ts: int) -> None:
-        horizon = ts - self.window_ms
-        tail_start = (
-            self._fixation_ts - self.reset_window_ms
-            if self.reset_window_ms is not None
-            else horizon
-        )
-        while self._samples and (
-            self._samples[0][0] <= horizon or self._samples[0][0] < tail_start
-        ):
+        while self._samples and self._samples[0][0] <= ts - self.window_ms:
             self._samples.popleft()
 
     @staticmethod
-    def _median(samples) -> Tuple[float, float]:
-        yaw, pitch = np.median([(sample[1], sample[2]) for sample in samples], axis=0)
-        return float(yaw), float(pitch)
+    def _gazes(samples) -> np.ndarray:
+        values = np.array([sample[1:] for sample in samples], dtype=float).reshape(-1, 2)
+        return values[~np.isnan(values[:, 0])]
 
     @staticmethod
-    def _distance(a: Tuple[float, float], b: Tuple[float, float], noise: Tuple[float, float]) -> float:
+    def _distance(a, b, noise: Tuple[float, float]) -> float:
         return math.hypot((a[0] - b[0]) / noise[0], (a[1] - b[1]) / noise[1])
 
     def _drop_candidate(self) -> None:
         if (
             self._candidate is not None
             and self._samples
-            and self._samples[-1] == self._candidate
+            and self._samples[-1] is self._candidate
         ):
             self._samples.pop()
         self._candidate = None
 
-    def _start_fixation(self, sample: Tuple[int, float, float]) -> None:
-        self._samples.clear()
-        self._candidate = None
-        self._fixation_ts = sample[0]
-        self._samples.append(sample)
+    def _start_fixation(self, ts: int) -> None:
+        left_since = self._fixation_ts
+        self._fixation_ts = ts
+        left = [
+            s[0] for s in self._samples if left_since <= s[0] < ts and not math.isnan(s[1])
+        ]
+        if not left:
+            return
+        last = left[-1]
+        for sample in self._samples:
+            if sample[0] >= left_since and last - sample[0] >= self.reset_window_ms:
+                sample[1] = sample[2] = math.nan
 
-    def _accept(self, sample: Tuple[int, float, float], noise: Tuple[float, float]) -> None:
-        fixation = [
+    def _accept(self, sample: List[float], noise: Tuple[float, float]) -> None:
+        fixation = self._gazes(
             entry
             for entry in self._samples
-            if entry[0] >= self._fixation_ts and entry != self._candidate
-        ]
-        if not fixation:
-            self._start_fixation(sample)
-            return
-
-        gaze = sample[1:]
-        off_fixation = self._distance(gaze, self._median(fixation), noise)
-        candidate = self._candidate
-        if off_fixation <= self.reset_threshold_sigma:
+            if entry[0] >= self._fixation_ts and entry is not self._candidate
+        )
+        if not len(fixation):
             self._drop_candidate()
-        elif candidate is not None and self._distance(gaze, candidate[1:], noise) < off_fixation:
-            self._fixation_ts = candidate[0]
-            self._candidate = None
-            self.jump_count += 1
+            self._start_fixation(sample[0])
         else:
-            self._drop_candidate()
-            self._candidate = sample
+            gaze = sample[1:]
+            off_fixation = self._distance(gaze, np.median(fixation, axis=0), noise)
+            candidate = self._candidate
+            if off_fixation <= self.reset_threshold_sigma:
+                self._drop_candidate()
+            elif candidate is not None and self._distance(gaze, candidate[1:], noise) < off_fixation:
+                self._candidate = None
+                self._start_fixation(candidate[0])
+                self.jump_count += 1
+            else:
+                self._drop_candidate()
+                self._candidate = sample
         self._samples.append(sample)
 
     def receive_frame(
@@ -256,7 +256,7 @@ class GazeSmoothingStep:
             calibrated_event: Calibrated face and gaze data (optional)
 
         Returns:
-            Median gaze over the window, or None when the frame has no calibrated gaze
+            Mean gaze over the window's valid samples, or None when the frame has no calibrated gaze
         """
         if calibrated_event is None:
             self._drop_candidate()
@@ -269,18 +269,15 @@ class GazeSmoothingStep:
             return GazeDirection(yaw=yaw, pitch=pitch)
 
         ts = calibrated_event.face_mesh_event.ts
-        sample = (ts, yaw, pitch)
+        sample = [ts, yaw, pitch]
         self._trim(ts)
-        if not self._samples:
-            self._start_fixation(sample)
-        elif self.reset_window_ms is None:
+        if self.reset_window_ms is None:
             self._samples.append(sample)
         else:
             self._accept(sample, calibrated_event.model.eye_noise_deg)
-        self._trim(ts)
 
-        median_yaw, median_pitch = self._median(self._samples)
-        return GazeDirection(yaw=median_yaw, pitch=median_pitch)
+        mean_yaw, mean_pitch = self._gazes(self._samples).mean(axis=0)
+        return GazeDirection(yaw=float(mean_yaw), pitch=float(mean_pitch))
 
 
 class OpenTrackForwardStep:

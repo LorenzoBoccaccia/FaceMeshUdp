@@ -1,4 +1,3 @@
-# state_machine.py
 """
 StateMachine module for managing dispatcher states.
 Provides DispatcherState enum and StateMachine class for state management.
@@ -67,7 +66,6 @@ class StateMachine:
         self._state = new_state
         logger.info(f"State transition: {old_state.value} -> {new_state.value}")
         
-        # Call callback if registered
         if self._callback is not None:
             self._callback(old_state, new_state)
     

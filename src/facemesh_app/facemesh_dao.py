@@ -1,4 +1,3 @@
-# facemesh_dao.py
 """
 Data access and interpretation layer for the FaceMesh app.
 Provides FaceMesh-derived pose, eye, and landmark values.

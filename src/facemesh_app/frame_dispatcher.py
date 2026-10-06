@@ -28,13 +28,7 @@ from .capture_window import CaptureWindowManager
 from .overlay_calibration import CalibrationOverlayManager
 from .overlay_common import get_display_geo
 from .overlay_runtime import RuntimeOverlayManager
-from .state_machine import StateMachine, DispatcherState
-from .pipeline_steps import (
-    FaceMeshStep,
-    CalibrationAdapterStep,
-    GazeSmoothingStep,
-    OpenTrackForwardStep,
-)
+from .state_machine import DispatcherState
 
 logger = logging.getLogger(__name__)
 

@@ -15,7 +15,7 @@ pip install -e ".[dev]"
 ## Calibrate and run
 
 `calibrate.bat` records the `default` profile into `calibration-default.json`, `start.bat`
-loads it and publishes to games over FreeTrack (TrackIR interface, gaze multiplier 1.5, 500 ms gaze smoothing, 200 ms tail kept on gaze jumps beyond 3x your calibrated eye noise). Both run from the repository root, use `.venv`, and pass any
+loads it and publishes to games over FreeTrack (TrackIR interface, gaze multiplier 2, 2000 ms gaze smoothing, earlier view weighted as 200 ms on gaze jumps beyond 3x your calibrated eye noise). Both run from the repository root, use `.venv`, and pass any
 extra arguments through to the app (`start.bat --camera-index 1`).
 
 Measure the distance from your eyes to the screen and pass it to calibration, e.g.
@@ -56,13 +56,13 @@ Camera:
 
 - `--camera-index N` (`CAMERA_INDEX`, default 0) — which device to use
 
-Resolution, fps, fourcc, and backend are no longer user-configurable: the
-mediapipe FaceLandmarker downsamples internally to fixed sizes (128x128
-detector, 256x256 landmarks), so high-resolution capture only inflates
-per-frame buffer copies without improving accuracy. The app probes a fixed
-ladder of (backend, format, size) candidates from cheapest to most expensive
-on startup and accepts the first one that the camera actually delivers
-without hitting the driver's CPU-scaling slow path.
+Resolution, fps, fourcc, and backend are chosen automatically: the
+mediapipe FaceLandmarker reads the face through fixed-size crops (128x128
+detector, 256x256 landmarks), so capturing above 1024x768 only adds
+per-frame buffer copies without improving accuracy. The app tries a fixed
+ladder of (backend, format, size) modes from cheapest to most expensive
+on startup and accepts the first one the camera delivers at the requested
+size and full frame rate.
 
 OpenTrack:
 
@@ -81,11 +81,11 @@ Misc:
 - `--smooth MS` — forward the mean gaze of the last MS milliseconds of observed gaze (default 0, raw); blinks do not age the window, and a held gaze always settles on its calibrated direction, so the view centre does not drift
 - `--smooth-reset MS` — when the gaze jumps to a new fixation, keep the current view only with the weight of MS milliseconds and let the window refill with new frames, so the view eases straight toward the new fixation without snapping or turning back (default off)
 - `--smooth-threshold SIGMA` — distance from the current fixation, in multiples of the eye noise measured during calibration, that counts as a jump (default 3)
-
-Blinks are ignored: while the eyelids close and reopen (detected from the eye opening, against a threshold set from your calibration) no gaze is forwarded and the last view is held.
 - `--overlay-fps FPS` — overlay redraw rate (default 60)
 - `--log-interval SECONDS` — periodic stats interval (default 2.0)
 - `--quiet` — suppress console output
+
+Blinks are ignored: while the eyelids close and reopen (detected from the eye opening, against a threshold set from your calibration) no gaze is forwarded and the last view is held.
 
 ## Capture output
 
@@ -100,7 +100,8 @@ Left-click the overlay in capture mode to write:
 task build-exe
 ```
 
-Outputs `dist/facemesh.exe` via PyInstaller.
+Builds `dist/facemesh/facemesh.exe` with PyInstaller from `facemesh.spec`; `task dist-zip` packs that
+folder into `dist/facemesh-<version>-win64.zip`.
 
 ## Profiling
 

@@ -131,6 +131,9 @@ class CaptureWindowManager:
             "EYE Y/P: " + (_fmt(gaze.eye_yaw, gaze.eye_pitch) if gaze else "--"),
             "GAZE Y/P: " + (_fmt(gaze.yaw, gaze.pitch) if gaze else "--"),
             "SCREEN px: " + (_fmt(*gaze.screen_px) if gaze else "--"),
+            "EYE OPEN: "
+            + (f"{face_event.eye_opening:0.3f}" if has_face and face_event.eye_opening is not None else "--")
+            + (f" (blink < {calibrated_event.model.blink_opening:0.3f})" if calibrated_event else ""),
         ]
 
         font = cv2.FONT_HERSHEY_SIMPLEX

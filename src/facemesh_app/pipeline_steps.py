@@ -21,6 +21,9 @@ from .facemesh_dao import MM_PER_CM, FaceMeshEvent
 
 logger = logging.getLogger(__name__)
 
+BLINK_RECOVERY_RATIO = 0.95
+EYE_OPENING_SETTLED = 0.005
+
 
 class FaceMeshStep:
     """First pipeline step: Extract face mesh data from frames using MediaPipe FaceLandmarker."""
@@ -89,6 +92,50 @@ class CalibrationAdapterStep:
         return CalibratedFaceAndGazeEvent(face_mesh_event, self._model, gaze)
 
 
+class BlinkRejectionStep:
+    """Pipeline step: Withhold gaze while the eyelids close and reopen, when the iris reading is not gaze.
+
+    A blink starts when the eye opening falls below the calibrated blink level and lasts until
+    the lid is back near its open width, or has stopped reopening, which happens lower when
+    the user looks down.
+    """
+
+    def __init__(self):
+        self._blinking = False
+        self._open_opening: Optional[float] = None
+        self._previous_opening: Optional[float] = None
+
+    def receive_frame(
+        self,
+        frame: np.ndarray,
+        face_mesh_event: Optional[FaceMeshEvent],
+        calibrated_event: Optional[CalibratedFaceAndGazeEvent],
+    ) -> Optional[CalibratedFaceAndGazeEvent]:
+        """The calibrated event, or None while the user is blinking."""
+        if calibrated_event is None:
+            return None
+        opening = calibrated_event.face_mesh_event.eye_opening
+        blink_level = calibrated_event.model.blink_opening
+        previous = self._previous_opening
+        self._previous_opening = opening
+        if self._blinking:
+            reopened = (
+                self._open_opening is not None
+                and opening >= BLINK_RECOVERY_RATIO * self._open_opening
+            )
+            settled = (
+                opening >= blink_level
+                and previous is not None
+                and opening - previous <= EYE_OPENING_SETTLED
+            )
+            self._blinking = not (reopened or settled)
+        elif opening < blink_level:
+            self._blinking = True
+        else:
+            self._open_opening = opening
+        return None if self._blinking else calibrated_event
+
+
 @dataclass(frozen=True)
 class GazeDirection:
     """Gaze direction handed to output steps, in degrees, opentrack axis convention."""
@@ -98,31 +145,33 @@ class GazeDirection:
 
 
 class GazeSmoothingStep:
-    """Pipeline step: Steady the calibrated gaze by averaging it over a trailing time window.
+    """Pipeline step: Steady the calibrated gaze with the median of a trailing time window.
 
-    Movement within the threshold is treated as fixation jitter and averaged away. When the
-    gaze leaves the current fixation for good, only a short tail of the previous fixation is
-    kept, so the view moves to the new fixation promptly while still easing into it.
-    The output depends only on the samples inside the window, so a held gaze always settles
-    on its calibrated absolute direction no matter how fast or slow it got there.
+    Movement within the threshold, measured against the calibrated eye noise, is treated as
+    fixation jitter and smoothed away. When the gaze leaves the current fixation for good, only
+    a short tail of the previous fixation is kept, so the view moves to the new fixation
+    promptly while still easing into it. The output depends only on the samples inside the
+    window, so a held gaze always settles on its calibrated absolute direction no matter how
+    fast or slow it got there, and short outliers cannot pull it.
     """
 
     def __init__(
         self,
         window_ms: int = 0,
         reset_window_ms: Optional[int] = None,
-        reset_threshold_deg: float = 1.0,
+        reset_threshold_sigma: float = 3.0,
     ):
         """Initialize gaze smoothing step.
 
         Args:
-            window_ms: Length of the averaging window in milliseconds; 0 forwards the gaze raw
+            window_ms: Length of the smoothing window in milliseconds; 0 forwards the gaze raw
             reset_window_ms: Tail of the previous fixation kept after a jump; None disables jumps
-            reset_threshold_deg: Distance from the current fixation beyond fixation jitter
+            reset_threshold_sigma: Distance from the current fixation, in multiples of the
+                calibrated eye noise, that counts as leaving it
         """
         self.window_ms = window_ms
         self.reset_window_ms = reset_window_ms
-        self.reset_threshold_deg = reset_threshold_deg
+        self.reset_threshold_sigma = reset_threshold_sigma
         self.jump_count = 0
         self._samples: Deque[Tuple[int, float, float]] = deque()
         self._fixation_ts = 0
@@ -130,7 +179,7 @@ class GazeSmoothingStep:
 
         logger.debug(
             f"GazeSmoothingStep initialized: window_ms={window_ms}, "
-            f"reset_window_ms={reset_window_ms}, reset_threshold_deg={reset_threshold_deg}"
+            f"reset_window_ms={reset_window_ms}, reset_threshold_sigma={reset_threshold_sigma}"
         )
 
     def _trim(self, ts: int) -> None:
@@ -146,12 +195,13 @@ class GazeSmoothingStep:
             self._samples.popleft()
 
     @staticmethod
-    def _mean(samples) -> Tuple[float, float]:
-        count = len(samples)
-        return (
-            sum(sample[1] for sample in samples) / count,
-            sum(sample[2] for sample in samples) / count,
-        )
+    def _median(samples) -> Tuple[float, float]:
+        yaw, pitch = np.median([(sample[1], sample[2]) for sample in samples], axis=0)
+        return float(yaw), float(pitch)
+
+    @staticmethod
+    def _distance(a: Tuple[float, float], b: Tuple[float, float], noise: Tuple[float, float]) -> float:
+        return math.hypot((a[0] - b[0]) / noise[0], (a[1] - b[1]) / noise[1])
 
     def _drop_candidate(self) -> None:
         if (
@@ -168,7 +218,7 @@ class GazeSmoothingStep:
         self._fixation_ts = sample[0]
         self._samples.append(sample)
 
-    def _accept(self, sample: Tuple[int, float, float]) -> None:
+    def _accept(self, sample: Tuple[int, float, float], noise: Tuple[float, float]) -> None:
         fixation = [
             entry
             for entry in self._samples
@@ -178,15 +228,12 @@ class GazeSmoothingStep:
             self._start_fixation(sample)
             return
 
-        _, yaw, pitch = sample
-        fixation_yaw, fixation_pitch = self._mean(fixation)
-        off_fixation = math.hypot(yaw - fixation_yaw, pitch - fixation_pitch)
+        gaze = sample[1:]
+        off_fixation = self._distance(gaze, self._median(fixation), noise)
         candidate = self._candidate
-        if off_fixation <= self.reset_threshold_deg:
+        if off_fixation <= self.reset_threshold_sigma:
             self._drop_candidate()
-        elif candidate is not None and math.hypot(
-            yaw - candidate[1], pitch - candidate[2]
-        ) < off_fixation:
+        elif candidate is not None and self._distance(gaze, candidate[1:], noise) < off_fixation:
             self._fixation_ts = candidate[0]
             self._candidate = None
             self.jump_count += 1
@@ -209,7 +256,7 @@ class GazeSmoothingStep:
             calibrated_event: Calibrated face and gaze data (optional)
 
         Returns:
-            Gaze averaged over the window, or None when the frame has no calibrated gaze
+            Median gaze over the window, or None when the frame has no calibrated gaze
         """
         if calibrated_event is None:
             self._drop_candidate()
@@ -229,11 +276,11 @@ class GazeSmoothingStep:
         elif self.reset_window_ms is None:
             self._samples.append(sample)
         else:
-            self._accept(sample)
+            self._accept(sample, calibrated_event.model.eye_noise_deg)
         self._trim(ts)
 
-        mean_yaw, mean_pitch = self._mean(self._samples)
-        return GazeDirection(yaw=mean_yaw, pitch=mean_pitch)
+        median_yaw, median_pitch = self._median(self._samples)
+        return GazeDirection(yaw=median_yaw, pitch=median_pitch)
 
 
 class OpenTrackForwardStep:

@@ -405,8 +405,25 @@ class FaceMeshEvent:
     def right_eye_key_points(self) -> List[List[float]]:
         return self._landmarks_xyz_by_indices(RIGHT_EYE_KEY_IDXS)
 
+    @property
+    def eye_opening(self) -> Optional[float]:
+        """Gap between the eyelids relative to the eye's width, averaged over both eyes; small during blinks."""
+        openings = []
+        for upper, lower, outer, inner in (
+            (LEFT_EYE_UPPER_IDX, LEFT_EYE_LOWER_IDX, LEFT_EYE_OUTER_IDX, LEFT_EYE_INNER_IDX),
+            (RIGHT_EYE_UPPER_IDX, RIGHT_EYE_LOWER_IDX, RIGHT_EYE_OUTER_IDX, RIGHT_EYE_INNER_IDX),
+        ):
+            points = [self._head_frame_xy(self.landmark_xyz(idx)) for idx in (upper, lower, outer, inner)]
+            if any(p is None for p in points):
+                return None
+            width = math.dist(points[2], points[3])
+            if width <= 1e-9:
+                return None
+            openings.append(math.dist(points[0], points[1]) / width)
+        return sum(openings) / len(openings)
+
     def geometry_inputs(self) -> Dict[str, Any]:
-        """Everything the head pose, eye position and eye angles are derived from, for offline analysis."""
+        """Everything the head pose, eye position, eye angles and eye opening are derived from, for offline analysis."""
         return {
             "imageSize": [self.image_width, self.image_height],
             "transformMatrix": self.transform_matrix_as_flat(),
@@ -417,8 +434,12 @@ class FaceMeshEvent:
                     RIGHT_IRIS_CENTER_IDX,
                     LEFT_EYE_INNER_IDX,
                     LEFT_EYE_OUTER_IDX,
+                    LEFT_EYE_UPPER_IDX,
+                    LEFT_EYE_LOWER_IDX,
                     RIGHT_EYE_INNER_IDX,
                     RIGHT_EYE_OUTER_IDX,
+                    RIGHT_EYE_UPPER_IDX,
+                    RIGHT_EYE_LOWER_IDX,
                     NOSE_BRIDGE_IDX,
                     NOSE_BASE_IDX,
                 )

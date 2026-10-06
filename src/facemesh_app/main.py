@@ -21,6 +21,7 @@ from facemesh_app.frame_dispatcher import FrameDispatcher, ensure_model, MODEL_P
 from facemesh_app.pipeline_steps import (
     FaceMeshStep,
     CalibrationAdapterStep,
+    BlinkRejectionStep,
     GazeSmoothingStep,
     OpenTrackForwardStep,
 )
@@ -93,10 +94,10 @@ def parse_args():
     parser.add_argument(
         "--smooth-threshold",
         type=float,
-        default=1.0,
-        metavar="DEG",
-        help="Distance from the current fixation, just above fixation jitter, that counts "
-        "as a jump for --smooth-reset (default: 1)",
+        default=3.0,
+        metavar="SIGMA",
+        help="Distance from the current fixation, in multiples of the calibrated eye noise, "
+        "that counts as a jump for --smooth-reset (default: 3)",
     )
     parser.add_argument("--quiet", action="store_true", help="Suppress output")
     parser.add_argument(
@@ -187,7 +188,7 @@ def parse_args():
     if args.smooth_reset is not None and not 0 <= args.smooth_reset < args.smooth:
         parser.error("--smooth-reset must be at least 0 and shorter than --smooth")
     if args.smooth_threshold <= 0:
-        parser.error("--smooth-threshold must be a positive number of degrees")
+        parser.error("--smooth-threshold must be a positive multiple of the eye noise")
     if args.viewing_distance is not None and args.viewing_distance <= 0:
         parser.error("--viewing-distance must be a positive number of centimetres")
     if args.freetrack_multiplier <= 0:
@@ -310,7 +311,7 @@ def main():
     gaze_smoothing_step = GazeSmoothingStep(
         window_ms=args.smooth,
         reset_window_ms=args.smooth_reset,
-        reset_threshold_deg=args.smooth_threshold,
+        reset_threshold_sigma=args.smooth_threshold,
     )
     if args.smooth <= 0:
         logger.info("Gaze smoothing: off (raw)")
@@ -319,7 +320,7 @@ def main():
     else:
         logger.info(
             f"Gaze smoothing window: {args.smooth} ms, {args.smooth_reset} ms tail kept "
-            f"on jumps beyond {args.smooth_threshold:g} deg"
+            f"on jumps beyond {args.smooth_threshold:g}x the eye noise"
         )
 
     opentrack_forward_step = OpenTrackForwardStep(
@@ -348,6 +349,7 @@ def main():
         state_machine=state_machine,
         face_mesh_step=face_mesh_step,
         calibration_adapter_step=calibration_adapter_step,
+        blink_rejection_step=BlinkRejectionStep(),
         gaze_smoothing_step=gaze_smoothing_step,
         opentrack_forward_step=opentrack_forward_step,
         freetrack_forward_step=freetrack_forward_step,

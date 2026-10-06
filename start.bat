@@ -9,5 +9,5 @@ if not exist "calibration-default.json" if not exist "calibration.json" (
     exit /b 1
 )
 
-call "%~dp0scripts\facemesh_launch.bat" --freetrack --freetrack-interface npclient --smooth 500 --smooth-reset 200 --smooth-threshold 5 --calibration-profile default %*
+call "%~dp0scripts\facemesh_launch.bat" --freetrack --freetrack-interface npclient --smooth 500 --smooth-reset 200 --smooth-threshold 3 --freetrack-multiplier 1.5 --calibration-profile default %*
 exit /b %ERRORLEVEL%

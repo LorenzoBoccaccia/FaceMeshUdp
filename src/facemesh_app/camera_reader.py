@@ -1,7 +1,7 @@
 """
 Camera capture in the cheapest mode that still gives the face landmark model full detail.
 
-MediaPipe's FaceLandmarker reads the face through a fixed 256x256 crop, so frames larger than
+The face landmark model reads the face through a fixed 256x256 crop, so frames larger than
 needed only add read and copy time, while frames shorter than 768 lines make it upsample the face
 and blur the landmarks. Modes are tried from 1024x768 upward, preferring NV12, which the driver
 scales in hardware, and 4:3 framing, which gives the face more of the frame. A mode is accepted

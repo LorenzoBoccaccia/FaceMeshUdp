@@ -9,16 +9,15 @@ import json
 import math
 import sys
 import time
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
 
 import cv2
-from mediapipe.tasks import python
-from mediapipe.tasks.python import vision
 
-from capture_frame_flow import detect_face_landmarker_result, finalize_ui_frame
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+from capture_frame_flow import face_to_raw_result, finalize_ui_frame, measure_face
+from facemesh_app.face_landmarker import FaceLandmarker, FaceLandmarks, ensure_bundle
 
 
 def safe_float(v, fallback=0.0):
@@ -30,8 +29,6 @@ def safe_float(v, fallback=0.0):
 
 
 # Constants
-MODEL_PATH = Path("face_landmarker.task")
-MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
 OUTPUT_DIR = Path("pitch_correlation")
 
 # Colors
@@ -103,15 +100,6 @@ PROMPTS = [
         "type": "combined",
     },
 ]
-
-
-def ensure_model():
-    """Download MediaPipe model if not present."""
-    if MODEL_PATH.exists():
-        return
-    print(f"Downloading model from {MODEL_URL}...")
-    urllib.request.urlretrieve(MODEL_URL, str(MODEL_PATH))
-    print("Model downloaded.")
 
 
 def open_camera(camera_index: int = 0) -> Tuple[cv2.VideoCapture, Dict]:
@@ -257,210 +245,113 @@ def _nose_plane_reference(
     }
 
 
-def serialize_mediapipe_result(result) -> Dict[str, Any]:
-    if result is None:
-        return {}
-
-    def serialize_landmarks(landmarks):
-        if landmarks is None:
+def extract_eye_geometry(face_landmarks):
+    def get_point(idx):
+        if (
+            face_landmarks is None
+            or idx < 0
+            or idx >= len(face_landmarks)
+            or face_landmarks[idx] is None
+        ):
             return None
-        try:
-            if hasattr(landmarks, "__iter__") and not isinstance(
-                landmarks, (str, bytes)
-            ):
-                result = []
-                for lm in landmarks:
-                    x_val = getattr(lm, "x", None) if hasattr(lm, "x") else None
-                    y_val = getattr(lm, "y", None) if hasattr(lm, "y") else None
-                    z_val = getattr(lm, "z", None) if hasattr(lm, "z") else None
-
-                    lm_data = {
-                        "x": safe_float(x_val) if x_val is not None else None,
-                        "y": safe_float(y_val) if y_val is not None else None,
-                        "z": safe_float(z_val) if z_val is not None else None,
-                    }
-                    if hasattr(lm, "visibility"):
-                        v_val = getattr(lm, "visibility", None)
-                        lm_data["visibility"] = (
-                            safe_float(v_val) if v_val is not None else None
-                        )
-                    if hasattr(lm, "presence"):
-                        p_val = getattr(lm, "presence", None)
-                        lm_data["presence"] = (
-                            safe_float(p_val) if p_val is not None else None
-                        )
-                    result.append(lm_data)
-                return result
-        except (AttributeError, TypeError, ValueError) as e:
-            print(f"Error serializing landmarks: {e}")
-        return None
-
-    def serialize_matrix(matrix):
-        if matrix is None:
+        point = face_landmarks[idx]
+        x = safe_float(point.get("x"), float("nan"))
+        y = safe_float(point.get("y"), float("nan"))
+        z = safe_float(point.get("z"), float("nan"))
+        if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(z)):
             return None
-        try:
-            if hasattr(matrix, "flatten"):
-                return [float(x) for x in matrix.flatten()]
-            elif hasattr(matrix, "__iter__"):
-                flat = []
-                for row in matrix:
-                    if hasattr(row, "__iter__"):
-                        flat.extend([float(x) for x in row])
-                    else:
-                        flat.append(float(row))
-                return flat
-        except (AttributeError, TypeError, ValueError) as e:
-            print(f"Error serializing matrix: {e}")
-        return None
+        return {
+            "x": x,
+            "y": y,
+            "z": z,
+        }
 
-    def serialize_blendshapes(blendshapes):
-        if blendshapes is None:
+    def get_xy(idx):
+        point = get_point(idx)
+        if point is None:
             return None
-        try:
-            if hasattr(blendshapes, "__iter__") and not isinstance(
-                blendshapes, (str, bytes)
-            ):
-                return [
-                    {
-                        "category": str(bs.category)
-                        if hasattr(bs, "category")
-                        else None,
-                        "score": float(bs.score) if hasattr(bs, "score") else None,
-                    }
-                    for bs in blendshapes
-                ]
-        except (AttributeError, TypeError, ValueError) as e:
-            print(f"Error serializing blendshapes: {e}")
-        return None
+        return point["x"], point["y"]
 
-    def extract_eye_geometry(face_landmarks):
-        def get_point(idx):
-            if (
-                face_landmarks is None
-                or idx < 0
-                or idx >= len(face_landmarks)
-                or face_landmarks[idx] is None
-            ):
-                return None
-            point = face_landmarks[idx]
-            x = safe_float(point.get("x"), float("nan"))
-            y = safe_float(point.get("y"), float("nan"))
-            z = safe_float(point.get("z"), float("nan"))
-            if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(z)):
-                return None
-            return {
-                "x": x,
-                "y": y,
-                "z": z,
-            }
+    def nose_reference():
+        bridge = get_xy(NOSE_BRIDGE_IDX)
+        base = get_xy(NOSE_BASE_IDX)
+        left_iris = get_xy(LEFT_IRIS_CENTER_IDX)
+        right_iris = get_xy(RIGHT_IRIS_CENTER_IDX)
+        if (
+            bridge is None
+            or base is None
+            or left_iris is None
+            or right_iris is None
+        ):
+            return None
 
-        def get_xy(idx):
-            point = get_point(idx)
-            if point is None:
-                return None
-            return point["x"], point["y"]
+        ref = _nose_plane_reference(bridge, base, left_iris, right_iris)
+        if ref is None:
+            return None
 
-        def nose_reference():
-            bridge = get_xy(NOSE_BRIDGE_IDX)
-            base = get_xy(NOSE_BASE_IDX)
-            left_iris = get_xy(LEFT_IRIS_CENTER_IDX)
-            right_iris = get_xy(RIGHT_IRIS_CENTER_IDX)
-            if (
-                bridge is None
-                or base is None
-                or left_iris is None
-                or right_iris is None
-            ):
-                return None
-
-            ref = _nose_plane_reference(bridge, base, left_iris, right_iris)
-            if ref is None:
-                return None
-
-            return {
-                "bridge": get_point(NOSE_BRIDGE_IDX),
-                "base": get_point(NOSE_BASE_IDX),
-                "bridgeToBaseUnit": {"x": ref["nHatX"], "y": ref["nHatY"]},
-                "perpendicularAtBridgeUnit": {"x": ref["pHatX"], "y": ref["pHatY"]},
-                "bridgeToBaseLengthNorm": ref["axisLength"],
-                "eyeSpanNorm": ref["eyeSpan"],
-                "leftIrisToPerpendicularSignedNorm": ref["leftSigned"],
-                "rightIrisToPerpendicularSignedNorm": ref["rightSigned"],
-                "avgIrisToPerpendicularSignedNorm": ref["avgSigned"],
-                "leftIrisToPerpendicularByEyeSpan": ref["leftSigned"] / ref["eyeSpan"],
-                "rightIrisToPerpendicularByEyeSpan": ref["rightSigned"]
-                / ref["eyeSpan"],
-                "avgIrisToPerpendicularByEyeSpan": ref["avgSigned"] / ref["eyeSpan"],
-                "leftIrisPerpendicularFoot": {
-                    "x": ref["leftProjX"],
-                    "y": ref["leftProjY"],
-                },
-                "rightIrisPerpendicularFoot": {
-                    "x": ref["rightProjX"],
-                    "y": ref["rightProjY"],
-                },
-            }
-
-        geometry = {
-            "leftEye": {
-                "irisCenter": get_point(LEFT_IRIS_CENTER_IDX),
-                "innerCanthus": get_point(133),
-                "outerCanthus": get_point(33),
-                "upperEyelid": get_point(159),
-                "lowerEyelid": get_point(145),
+        return {
+            "bridge": get_point(NOSE_BRIDGE_IDX),
+            "base": get_point(NOSE_BASE_IDX),
+            "bridgeToBaseUnit": {"x": ref["nHatX"], "y": ref["nHatY"]},
+            "perpendicularAtBridgeUnit": {"x": ref["pHatX"], "y": ref["pHatY"]},
+            "bridgeToBaseLengthNorm": ref["axisLength"],
+            "eyeSpanNorm": ref["eyeSpan"],
+            "leftIrisToPerpendicularSignedNorm": ref["leftSigned"],
+            "rightIrisToPerpendicularSignedNorm": ref["rightSigned"],
+            "avgIrisToPerpendicularSignedNorm": ref["avgSigned"],
+            "leftIrisToPerpendicularByEyeSpan": ref["leftSigned"] / ref["eyeSpan"],
+            "rightIrisToPerpendicularByEyeSpan": ref["rightSigned"]
+            / ref["eyeSpan"],
+            "avgIrisToPerpendicularByEyeSpan": ref["avgSigned"] / ref["eyeSpan"],
+            "leftIrisPerpendicularFoot": {
+                "x": ref["leftProjX"],
+                "y": ref["leftProjY"],
             },
-            "rightEye": {
-                "irisCenter": get_point(RIGHT_IRIS_CENTER_IDX),
-                "innerCanthus": get_point(362),
-                "outerCanthus": get_point(263),
-                "upperEyelid": get_point(386),
-                "lowerEyelid": get_point(374),
+            "rightIrisPerpendicularFoot": {
+                "x": ref["rightProjX"],
+                "y": ref["rightProjY"],
             },
         }
-        geometry["noseReference"] = nose_reference()
-        return geometry
 
-    data = {}
+    geometry = {
+        "leftEye": {
+            "irisCenter": get_point(LEFT_IRIS_CENTER_IDX),
+            "innerCanthus": get_point(133),
+            "outerCanthus": get_point(33),
+            "upperEyelid": get_point(159),
+            "lowerEyelid": get_point(145),
+        },
+        "rightEye": {
+            "irisCenter": get_point(RIGHT_IRIS_CENTER_IDX),
+            "innerCanthus": get_point(362),
+            "outerCanthus": get_point(263),
+            "upperEyelid": get_point(386),
+            "lowerEyelid": get_point(374),
+        },
+    }
+    geometry["noseReference"] = nose_reference()
+    return geometry
 
-    # Get facial transformation matrixes
-    if hasattr(result, "facial_transformation_matrixes"):
-        fts = result.facial_transformation_matrixes
-        if fts and len(fts) > 0:
-            data["facial_transformation_matrix"] = serialize_matrix(fts[0])
 
-    # Get face landmarks
-    if hasattr(result, "face_landmarks"):
-        fl = result.face_landmarks
-        if fl and len(fl) > 0:
-            # MediaPipe returns a list, one per face detected
-            data["face_landmarks"] = serialize_landmarks(fl[0])
-            data["eye_geometry"] = extract_eye_geometry(data["face_landmarks"])
-        else:
-            print(f"Warning: No face landmarks found in result")
-
-    # Get face blendshapes
-    if hasattr(result, "face_blendshapes"):
-        fbs = result.face_blendshapes
-        if fbs and len(fbs) > 0:
-            data["face_blendshapes"] = serialize_blendshapes(fbs[0])
-
+def serialize_face(face: Optional[FaceLandmarks]) -> Dict[str, Any]:
+    data = face_to_raw_result(face)
+    if "face_landmarks" in data:
+        data["eye_geometry"] = extract_eye_geometry(data["face_landmarks"])
     return data
 
 
 def _landmark_to_px(landmark, width: int, height: int) -> Tuple[int, int]:
-    x = int(round(safe_float(getattr(landmark, "x", 0.0)) * width))
-    y = int(round(safe_float(getattr(landmark, "y", 0.0)) * height))
+    x = int(round(safe_float(landmark[0]) * width))
+    y = int(round(safe_float(landmark[1]) * height))
     x = max(0, min(width - 1, x))
     y = max(0, min(height - 1, y))
     return x, y
 
 
 def _draw_eye_landmarks(frame, result) -> Optional[Dict[str, float]]:
-    if result is None or not getattr(result, "face_landmarks", None):
+    if result is None:
         return None
-    face_landmarks = result.face_landmarks[0]
-    if face_landmarks is None:
-        return None
+    face_landmarks = result.landmarks
 
     h, w = frame.shape[:2]
 
@@ -550,7 +441,7 @@ class PitchCorrelationPoint:
     head_position: str  # 'down', 'center', 'up'
     eye_position: str  # 'down', 'center', 'up'
     timestamp_ms: int
-    raw_result: Dict[str, Any]  # Serialized MediaPipe result
+    raw_result: Dict[str, Any]  # Serialized face measurement
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -587,17 +478,8 @@ class PitchCorrelationCapture:
         self.cap, self.camera_info = open_camera(self.camera_index)
 
     def init_landmarker(self):
-        """Initialize MediaPipe FaceLandmarker."""
-        ensure_model()
-        base = python.BaseOptions(model_asset_path=str(MODEL_PATH))
-        opts = vision.FaceLandmarkerOptions(
-            base_options=base,
-            output_face_blendshapes=True,
-            output_facial_transformation_matrixes=True,
-            running_mode=vision.RunningMode.IMAGE,
-            num_faces=1,
-        )
-        self.landmarker = vision.FaceLandmarker.create_from_options(opts)
+        """Load the face landmarker."""
+        self.landmarker = FaceLandmarker.from_bundle(ensure_bundle(), with_blendshapes=True)
         print("FaceLandmarker initialized")
 
     def mouse_callback(self, event, x, y, flags, param):
@@ -670,11 +552,8 @@ class PitchCorrelationCapture:
         )
 
         # Face detection indicator
-        if hasattr(self, "last_result") and self.last_result:
-            has_face = bool(
-                self.last_result.face_landmarks
-                and len(self.last_result.face_landmarks) > 0
-            )
+        if self.landmarker is not None:
+            has_face = self.last_result is not None
             face_text = "Face: DETECTED" if has_face else "Face: NOT DETECTED"
             face_color = GREEN if has_face else RED
             cv2.putText(
@@ -745,7 +624,7 @@ class PitchCorrelationCapture:
                 time.sleep(0.01)
                 continue
 
-            result = detect_face_landmarker_result(self.landmarker, frame_bgr)
+            result = measure_face(self.landmarker, frame_bgr)
             self.last_result = result
 
             frame_with_ui = frame_bgr.copy()
@@ -765,7 +644,7 @@ class PitchCorrelationCapture:
                 print(f"Captured: {prompt['name']}")
 
                 # Serialize the result
-                raw_data = serialize_mediapipe_result(result)
+                raw_data = serialize_face(result)
 
                 # Create pitch correlation point
                 point = PitchCorrelationPoint(
@@ -861,8 +740,6 @@ class PitchCorrelationCapture:
             cv2.destroyAllWindows()
             if self.cap is not None:
                 self.cap.release()
-            if self.landmarker is not None:
-                self.landmarker.close()
 
 
 def main():

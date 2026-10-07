@@ -1,6 +1,6 @@
 # FaceMeshUdp
 
-Python face-tracking app built on MediaPipe FaceLandmarker. Produces gaze/head-pose output with an optional overlay, capture tooling, a 9-point calibration workflow, UDP forwarding to OpenTrack, and direct FreeTrack 2.0 Enhanced output to games. See [eyes.ini](eyes.ini) for an example opentrack profile that consumes the UDP stream.
+Python face-tracking app built on the MediaPipe face landmarker model, run with OpenCV. Produces gaze/head-pose output with an optional overlay, capture tooling, a 9-point calibration workflow, UDP forwarding to OpenTrack, and direct FreeTrack 2.0 Enhanced output to games. See [eyes.ini](eyes.ini) for an example opentrack profile that consumes the UDP stream.
 
 [![Demo reel](demo.gif)](https://youtu.be/I_M037X3Fb8)
 
@@ -57,7 +57,7 @@ Camera:
 - `--camera-index N` (`CAMERA_INDEX`, default 0) — which device to use
 
 Resolution, fps, fourcc, and backend are chosen automatically: the
-mediapipe FaceLandmarker reads the face through fixed-size crops (128x128
+face landmarker model reads the face through fixed-size crops (128x128
 detector, 256x256 landmarks), so capturing above 1024x768 only adds
 per-frame buffer copies without improving accuracy. The app tries a fixed
 ladder of (backend, format, size) modes from cheapest to most expensive

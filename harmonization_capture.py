@@ -9,17 +9,15 @@ import json
 import math
 import sys
 import time
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
 
 import cv2
-from mediapipe.tasks import python
-from mediapipe.tasks.python import vision
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
-from capture_frame_flow import detect_face_landmarker_result, finalize_ui_frame
+from capture_frame_flow import face_to_raw_result, finalize_ui_frame, measure_face
+from facemesh_app.face_landmarker import FaceLandmarker, ensure_bundle
 from facemesh_app.harmonization_contract import (
     HARMONIZATION_PROMPTS,
     HARMONIZATION_SCHEMA_VERSION,
@@ -36,8 +34,6 @@ def safe_float(v, fallback=0.0):
 
 
 # Constants
-MODEL_PATH = Path("face_landmarker.task")
-MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
 OUTPUT_DIR = Path("harmonization_data")
 
 # Colors
@@ -50,15 +46,6 @@ HUD_BORDER = (230, 230, 230)
 HUD_TEXT = (245, 245, 245)
 
 PROMPTS = HARMONIZATION_PROMPTS
-
-
-def ensure_model():
-    """Download MediaPipe model if not present."""
-    if MODEL_PATH.exists():
-        return
-    print(f"Downloading model from {MODEL_URL}...")
-    urllib.request.urlretrieve(MODEL_URL, str(MODEL_PATH))
-    print("Model downloaded.")
 
 
 def open_camera(camera_index: int = 0) -> Tuple[cv2.VideoCapture, Dict]:
@@ -142,107 +129,6 @@ def draw_text_with_background(
     )
 
 
-def serialize_mediapipe_result(result) -> Dict[str, Any]:
-    if result is None:
-        return {}
-
-    def serialize_landmarks(landmarks):
-        if landmarks is None:
-            return None
-        try:
-            if hasattr(landmarks, "__iter__") and not isinstance(
-                landmarks, (str, bytes)
-            ):
-                result = []
-                for lm in landmarks:
-                    x_val = getattr(lm, "x", None) if hasattr(lm, "x") else None
-                    y_val = getattr(lm, "y", None) if hasattr(lm, "y") else None
-                    z_val = getattr(lm, "z", None) if hasattr(lm, "z") else None
-
-                    lm_data = {
-                        "x": safe_float(x_val) if x_val is not None else None,
-                        "y": safe_float(y_val) if y_val is not None else None,
-                        "z": safe_float(z_val) if z_val is not None else None,
-                    }
-                    if hasattr(lm, "visibility"):
-                        v_val = getattr(lm, "visibility", None)
-                        lm_data["visibility"] = (
-                            safe_float(v_val) if v_val is not None else None
-                        )
-                    if hasattr(lm, "presence"):
-                        p_val = getattr(lm, "presence", None)
-                        lm_data["presence"] = (
-                            safe_float(p_val) if p_val is not None else None
-                        )
-                    result.append(lm_data)
-                return result
-        except (AttributeError, TypeError, ValueError) as e:
-            print(f"Error serializing landmarks: {e}")
-        return None
-
-    def serialize_matrix(matrix):
-        if matrix is None:
-            return None
-        try:
-            if hasattr(matrix, "flatten"):
-                return [float(x) for x in matrix.flatten()]
-            elif hasattr(matrix, "__iter__"):
-                flat = []
-                for row in matrix:
-                    if hasattr(row, "__iter__"):
-                        flat.extend([float(x) for x in row])
-                    else:
-                        flat.append(float(row))
-                return flat
-        except (AttributeError, TypeError, ValueError) as e:
-            print(f"Error serializing matrix: {e}")
-        return None
-
-    def serialize_blendshapes(blendshapes):
-        if blendshapes is None:
-            return None
-        try:
-            if hasattr(blendshapes, "__iter__") and not isinstance(
-                blendshapes, (str, bytes)
-            ):
-                return [
-                    {
-                        "category": str(bs.category)
-                        if hasattr(bs, "category")
-                        else None,
-                        "score": float(bs.score) if hasattr(bs, "score") else None,
-                    }
-                    for bs in blendshapes
-                ]
-        except (AttributeError, TypeError, ValueError) as e:
-            print(f"Error serializing blendshapes: {e}")
-        return None
-
-    data = {}
-
-    # Get facial transformation matrixes
-    if hasattr(result, "facial_transformation_matrixes"):
-        fts = result.facial_transformation_matrixes
-        if fts and len(fts) > 0:
-            data["facial_transformation_matrix"] = serialize_matrix(fts[0])
-
-    # Get face landmarks
-    if hasattr(result, "face_landmarks"):
-        fl = result.face_landmarks
-        if fl and len(fl) > 0:
-            # MediaPipe returns a list, one per face detected
-            data["face_landmarks"] = serialize_landmarks(fl[0])
-        else:
-            print(f"Warning: No face landmarks found in result")
-
-    # Get face blendshapes
-    if hasattr(result, "face_blendshapes"):
-        fbs = result.face_blendshapes
-        if fbs and len(fbs) > 0:
-            data["face_blendshapes"] = serialize_blendshapes(fbs[0])
-
-    return data
-
 
 @dataclass
 class HarmonizationPoint:
@@ -291,17 +177,8 @@ class HarmonizationCapture:
         self.cap, self.camera_info = open_camera(self.camera_index)
 
     def init_landmarker(self):
-        """Initialize MediaPipe FaceLandmarker."""
-        ensure_model()
-        base = python.BaseOptions(model_asset_path=str(MODEL_PATH))
-        opts = vision.FaceLandmarkerOptions(
-            base_options=base,
-            output_face_blendshapes=True,
-            output_facial_transformation_matrixes=True,
-            running_mode=vision.RunningMode.IMAGE,
-            num_faces=1,
-        )
-        self.landmarker = vision.FaceLandmarker.create_from_options(opts)
+        """Load the face landmarker."""
+        self.landmarker = FaceLandmarker.from_bundle(ensure_bundle(), with_blendshapes=True)
         print("FaceLandmarker initialized")
 
     def mouse_callback(self, event, x, y, flags, param):
@@ -370,11 +247,8 @@ class HarmonizationCapture:
         )
 
         # Face detection indicator
-        if hasattr(self, "last_result") and self.last_result:
-            has_face = bool(
-                self.last_result.face_landmarks
-                and len(self.last_result.face_landmarks) > 0
-            )
+        if self.landmarker is not None:
+            has_face = self.last_result is not None
             face_text = "Face: DETECTED" if has_face else "Face: NOT DETECTED"
             face_color = GREEN if has_face else RED
             cv2.putText(
@@ -411,7 +285,7 @@ class HarmonizationCapture:
                 time.sleep(0.01)
                 continue
 
-            result = detect_face_landmarker_result(self.landmarker, frame_bgr)
+            result = measure_face(self.landmarker, frame_bgr)
             self.last_result = result
 
             frame_with_ui = self.draw_ui(
@@ -428,7 +302,7 @@ class HarmonizationCapture:
                 print(f"Captured: {prompt['name']}")
 
                 # Serialize the result
-                raw_data = serialize_mediapipe_result(result)
+                raw_data = face_to_raw_result(result)
 
                 # Create harmonization point
                 point = HarmonizationPoint(
@@ -524,8 +398,6 @@ class HarmonizationCapture:
             cv2.destroyAllWindows()
             if self.cap is not None:
                 self.cap.release()
-            if self.landmarker is not None:
-                self.landmarker.close()
 
 
 def main():

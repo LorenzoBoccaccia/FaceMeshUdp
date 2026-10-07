@@ -6,7 +6,6 @@ Orchestrates the synchronous frame processing pipeline.
 import json
 import logging
 import time
-import urllib.request
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple, Callable, Any
 
@@ -32,19 +31,8 @@ from .state_machine import DispatcherState
 
 logger = logging.getLogger(__name__)
 
-MODEL_PATH = Path("face_landmarker.task")
-MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
 CALIBRATION_DATA_DIR = Path("calibration_data")
 CALIBRATION_DATAPOINT_DIR = Path("calibration_datapoint")
-
-
-def ensure_model():
-    """Download the FaceLandmarker model if not present."""
-    if MODEL_PATH.exists():
-        return
-    logger.info(f"Downloading FaceMesh model from {MODEL_URL}")
-    urllib.request.urlretrieve(MODEL_URL, str(MODEL_PATH))
-    logger.info("FaceMesh model downloaded successfully")
 
 
 class FrameDispatcher:
@@ -215,9 +203,8 @@ class FrameDispatcher:
             return
         CALIBRATION_DATAPOINT_DIR.mkdir(parents=True, exist_ok=True)
         name = str(calib_point.name)
-        landmarks = list(evt.landmarks) if evt is not None and evt.landmarks else None
         img, err = build_camera_capture_marked_image(
-            {"evt": evt, "frame": frame, "landmarks": landmarks},
+            {"evt": evt, "frame": frame},
             overlay_w=float(self.display["width"]),
             overlay_h=float(self.display["height"]),
             click_pos=calib_point.nose_target_px,
@@ -368,11 +355,7 @@ class FrameDispatcher:
                 capture_live_img = None
                 if capture_live_enabled and capture_window_manager is not None:
                     mouse_x, mouse_y = capture_window_manager.get_mouse_position()
-                    snap = {
-                        "evt": evt,
-                        "frame": frame,
-                        "landmarks": list(evt.landmarks) if evt and evt.landmarks else None,
-                    }
+                    snap = {"evt": evt, "frame": frame}
                     capture_live_img, _ = build_camera_capture_marked_image(
                         snap,
                         overlay_w=float(w),

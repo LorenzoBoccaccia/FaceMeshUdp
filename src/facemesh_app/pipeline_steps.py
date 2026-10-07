@@ -12,11 +12,10 @@ from dataclasses import dataclass
 from typing import Deque, List, Optional, Tuple
 
 import cv2
-import mediapipe as mp
 import numpy as np
-from mediapipe.tasks.python import vision
 
 from .calibration import PERSON_AXES, CalibratedFaceAndGazeEvent, GazeModel
+from .face_landmarker import FaceLandmarker
 from .facemesh_dao import MM_PER_CM, FaceMeshEvent
 
 logger = logging.getLogger(__name__)
@@ -27,7 +26,7 @@ OPEN_WIDTH_FRAMES = 10
 
 
 class FaceMeshStep:
-    """First pipeline step: Extract face mesh data from frames using MediaPipe FaceLandmarker."""
+    """First pipeline step: Extract face mesh data from frames with the face landmarker."""
 
     _CONVERT_MAP = {
         "bgr": cv2.COLOR_BGR2RGB,
@@ -35,7 +34,7 @@ class FaceMeshStep:
         "nv12": cv2.COLOR_YUV2RGB_NV12,
     }
 
-    def __init__(self, face_landmarker: vision.FaceLandmarker):
+    def __init__(self, face_landmarker: FaceLandmarker):
         self.face_landmarker = face_landmarker
         self._last_timestamp_ms = -1
 
@@ -53,19 +52,16 @@ class FaceMeshStep:
                 code = self._CONVERT_MAP.get(pixel_format, cv2.COLOR_BGR2RGB)
                 frame_rgb = cv2.cvtColor(frame, code)
 
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
             ts = int(timestamp_ms)
             if ts <= self._last_timestamp_ms:
                 ts = self._last_timestamp_ms + 1
             self._last_timestamp_ms = ts
 
-            result = self.face_landmarker.detect_for_video(mp_image, ts)
-            evt = FaceMeshEvent.from_landmarker_result(
-                result,
+            return FaceMeshEvent(
+                self.face_landmarker.track(frame_rgb, ts),
                 image_size=(frame_rgb.shape[1], frame_rgb.shape[0]),
                 ts=ts,
             )
-            return evt
 
         except Exception as e:
             logger.error(f"Error processing frame in FaceMeshStep: {e}")

@@ -9,14 +9,11 @@ import os
 import sys
 from pathlib import Path
 
-from mediapipe.tasks import python
-from mediapipe.tasks.python import vision
-
-from facemesh_app._mediapipe_lazy import apply_lazy_landmarks_patch
 from facemesh_app.calibration import DEFAULT_VIEWING_DISTANCE_MM, load_calibration
 from facemesh_app.camera_reader import CameraReader
+from facemesh_app.face_landmarker import FaceLandmarker, ensure_bundle
 from facemesh_app.facemesh_dao import MM_PER_CM
-from facemesh_app.frame_dispatcher import FrameDispatcher, ensure_model, MODEL_PATH
+from facemesh_app.frame_dispatcher import FrameDispatcher
 from facemesh_app.pipeline_steps import (
     FaceMeshStep,
     CalibrationAdapterStep,
@@ -282,25 +279,15 @@ def main():
     state_machine = StateMachine()
 
     try:
-        ensure_model()
+        bundle = ensure_bundle()
     except Exception as e:
-        logger.error(f"Failed to download FaceMesh model: {e}")
+        logger.error(f"Failed to download the face landmarker model: {e}")
         raise
 
-    apply_lazy_landmarks_patch()
-
     try:
-        base = python.BaseOptions(model_asset_path=str(MODEL_PATH))
-        opts = vision.FaceLandmarkerOptions(
-            base_options=base,
-            output_face_blendshapes=bool(args.capture),
-            output_facial_transformation_matrixes=True,
-            running_mode=vision.RunningMode.VIDEO,
-            num_faces=1,
-        )
-        face_landmarker = vision.FaceLandmarker.create_from_options(opts)
+        face_landmarker = FaceLandmarker.from_bundle(bundle, with_blendshapes=bool(args.capture))
     except Exception as e:
-        logger.error(f"Failed to initialize FaceLandmarker: {e}")
+        logger.error(f"Failed to load the face landmarker model: {e}")
         raise
 
     face_mesh_step = FaceMeshStep(face_landmarker)

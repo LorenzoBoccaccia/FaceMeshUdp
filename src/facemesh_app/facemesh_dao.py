@@ -10,10 +10,12 @@ from typing import Any, Optional, Dict, List, Tuple
 
 import numpy as np
 
+from .face_geometry import VERTICAL_FOV_DEG
+from .face_landmarker import FaceLandmarks
+
 logger = logging.getLogger(__name__)
 
 
-MEDIAPIPE_VERTICAL_FOV_DEG = 63.0
 MM_PER_CM = 10.0
 
 HORIZONTAL_MAX_DEG = 60.0
@@ -72,21 +74,18 @@ def clamp(v, lo, hi):
 class FaceMeshEvent:
     def __init__(
         self,
-        result: Any = None,
+        face: Optional[FaceLandmarks],
         *,
         image_size: Tuple[int, int],
-        face_index: int = 0,
         ts: Optional[int] = None,
         event_type: str = "mesh",
     ):
-        self.result = result
+        self.face = face
         self.image_width = float(image_size[0])
         self.image_height = float(image_size[1])
-        self.face_index = int(face_index)
         self.type = str(event_type)
         self.ts = int(ts if ts is not None else time.time() * 1000)
         self._cache: Dict[str, Any] = {}
-        self._landmark_xyz_cache: Dict[int, Optional[List[float]]] = {}
 
     def _cache_get(self, key: str):
         return self._cache.get(key, _CACHE_MISS)
@@ -95,98 +94,15 @@ class FaceMeshEvent:
         self._cache[key] = value
         return value
 
-    @classmethod
-    def from_landmarker_result(
-        cls,
-        result: Any,
-        *,
-        image_size: Tuple[int, int],
-        face_index: int = 0,
-        ts: Optional[int] = None,
-    ):
-        return cls(
-            result,
-            image_size=image_size,
-            face_index=face_index,
-            ts=ts,
-            event_type="mesh",
-        )
-
-    def _face_item(self, attr_name: str):
-        if self.result is None:
-            return None
-        values = getattr(self.result, attr_name, None)
-        if values is None:
-            return None
-        try:
-            if len(values) <= self.face_index:
-                return None
-            return values[self.face_index]
-        except TypeError:
-            return values
-
-    @staticmethod
-    def _float_or_none(v) -> Optional[float]:
-        f = safe_float(v, float("nan"))
-        return f if math.isfinite(f) else None
-
-    def _transform_flat_no_fallback(self) -> Optional[List[float]]:
-        cached = self._cache_get("transform_flat_no_fallback")
-        if cached is not _CACHE_MISS:
-            return cached
-
-        m = self.transform_matrix
-        if m is None:
-            return self._cache_set("transform_flat_no_fallback", None)
-
-        values: List[float] = []
-        try:
-            if hasattr(m, "flatten"):
-                raw = m.flatten()
-                for v in raw:
-                    fv = self._float_or_none(v)
-                    if fv is None:
-                        return None
-                    values.append(fv)
-            else:
-                for row in m:
-                    if hasattr(row, "__iter__") and not isinstance(row, (str, bytes)):
-                        for v in row:
-                            fv = self._float_or_none(v)
-                            if fv is None:
-                                return None
-                            values.append(fv)
-                    else:
-                        fv = self._float_or_none(row)
-                        if fv is None:
-                            return None
-                        values.append(fv)
-        except Exception:
-            return self._cache_set("transform_flat_no_fallback", None)
-        return self._cache_set("transform_flat_no_fallback", values or None)
-
-    def _transform_m44(self) -> Optional[List[List[float]]]:
-        cached = self._cache_get("transform_m44")
-        if cached is not _CACHE_MISS:
-            return cached
-
-        flat = self._transform_flat_no_fallback()
-        if flat is None or len(flat) < 16:
-            return self._cache_set("transform_m44", None)
-        return self._cache_set("transform_m44", [flat[0:4], flat[4:8], flat[8:12], flat[12:16]])
+    @property
+    def transform_matrix(self) -> Optional[np.ndarray]:
+        return self.face.transform if self.face is not None else None
 
     @property
     def head_rotation(self) -> Optional[np.ndarray]:
         """Rotation from the face's own axes (x to its left, y up, z out of the face) to the camera frame."""
-        cached = self._cache_get("head_rotation")
-        if cached is not _CACHE_MISS:
-            return cached
-        m44 = self._transform_m44()
-        if m44 is None:
-            return self._cache_set("head_rotation", None)
-        return self._cache_set(
-            "head_rotation", np.array([row[0:3] for row in m44[0:3]], dtype=float)
-        )
+        transform = self.transform_matrix
+        return transform[:3, :3] if transform is not None else None
 
     def _head_frame_xy(self, point: Optional[List[float]]) -> Optional[List[float]]:
         """Landmark position on the face's own left-right and up-down axes, unaffected by head rotation."""
@@ -204,17 +120,7 @@ class FaceMeshEvent:
 
     @property
     def has_face(self) -> bool:
-        cached = self._cache_get("has_face")
-        if cached is not _CACHE_MISS:
-            return cached
-
-        lms = self.landmarks
-        if lms is None:
-            return self._cache_set("has_face", False)
-        try:
-            return self._cache_set("has_face", len(lms) > 0)
-        except Exception:
-            return self._cache_set("has_face", False)
+        return self.face is not None
 
     @property
     def head_yaw(self) -> Optional[float]:
@@ -232,47 +138,21 @@ class FaceMeshEvent:
             return None
         return math.degrees(math.asin(clamp(rotation[1][2], -1.0, 1.0)))
 
+    def _translation(self, axis: int) -> Optional[float]:
+        transform = self.transform_matrix
+        return float(transform[axis, 3]) if transform is not None else None
+
     @property
     def x(self) -> Optional[float]:
-        cached = self._cache_get("x")
-        if cached is not _CACHE_MISS:
-            return cached
-
-        m44 = self._transform_m44()
-        if m44 is not None:
-            return self._cache_set("x", m44[0][3])
-        flat = self._transform_flat_no_fallback()
-        if flat is not None and len(flat) > 3:
-            return self._cache_set("x", flat[3])
-        return self._cache_set("x", None)
+        return self._translation(0)
 
     @property
     def y(self) -> Optional[float]:
-        cached = self._cache_get("y")
-        if cached is not _CACHE_MISS:
-            return cached
-
-        m44 = self._transform_m44()
-        if m44 is not None:
-            return self._cache_set("y", m44[1][3])
-        flat = self._transform_flat_no_fallback()
-        if flat is not None and len(flat) > 7:
-            return self._cache_set("y", flat[7])
-        return self._cache_set("y", None)
+        return self._translation(1)
 
     @property
     def raw_transform_z(self) -> Optional[float]:
-        cached = self._cache_get("raw_transform_z")
-        if cached is not _CACHE_MISS:
-            return cached
-
-        m44 = self._transform_m44()
-        if m44 is not None:
-            return self._cache_set("raw_transform_z", m44[2][3])
-        flat = self._transform_flat_no_fallback()
-        if flat is not None and len(flat) > 11:
-            return self._cache_set("raw_transform_z", flat[11])
-        return self._cache_set("raw_transform_z", None)
+        return self._translation(2)
 
     @property
     def roll(self) -> Optional[float]:
@@ -291,43 +171,19 @@ class FaceMeshEvent:
         return math.degrees(math.atan2(float(up @ level_right), float(up @ level_up)))
 
     @property
-    def landmarks(self) -> Optional[List]:
-        cached = self._cache_get("landmarks")
-        if cached is not _CACHE_MISS:
-            return cached
-        return self._cache_set("landmarks", self._face_item("face_landmarks"))
+    def landmarks(self) -> Optional[np.ndarray]:
+        return self.face.landmarks if self.face is not None else None
 
-    def landmark(self, idx: int):
-        lms = self.landmarks
-        if lms is None:
-            return None
-        try:
-            if idx < 0 or idx >= len(lms):
-                return None
-            return lms[idx]
-        except Exception:
-            return None
-
-    def _landmark_xyz(self, lm) -> Optional[List[float]]:
-        if lm is None:
-            return None
-        if hasattr(lm, "x") and hasattr(lm, "y"):
-            return [
-                safe_float(lm.x),
-                safe_float(lm.y),
-                safe_float(getattr(lm, "z", 0.0)),
-            ]
-        if isinstance(lm, (list, tuple)) and len(lm) >= 3:
-            return [safe_float(lm[0]), safe_float(lm[1]), safe_float(lm[2])]
-        return None
+    @property
+    def mesh_edges(self) -> Optional[np.ndarray]:
+        """Landmark index pairs joined in the face surface."""
+        return self.face.mesh_edges if self.face is not None else None
 
     def landmark_xyz(self, idx: int) -> Optional[List[float]]:
-        key = int(idx)
-        if key in self._landmark_xyz_cache:
-            return self._landmark_xyz_cache[key]
-        value = self._landmark_xyz(self.landmark(key))
-        self._landmark_xyz_cache[key] = value
-        return value
+        landmarks = self.landmarks
+        if landmarks is None or not 0 <= idx < len(landmarks):
+            return None
+        return [float(v) for v in landmarks[idx]]
 
     def _landmarks_xyz_by_indices(self, indices: tuple[int, ...]) -> List[List[float]]:
         points: List[List[float]] = []
@@ -382,7 +238,7 @@ class FaceMeshEvent:
         u = sum(c[0] for c in corners) / len(corners) * self.image_width
         v = sum(c[1] for c in corners) / len(corners) * self.image_height
         focal_px = (self.image_height / 2.0) / math.tan(
-            math.radians(MEDIAPIPE_VERTICAL_FOV_DEG / 2.0)
+            math.radians(VERTICAL_FOV_DEG / 2.0)
         )
         depth_mm = -head_z_cm * MM_PER_CM
         return self._cache_set(
@@ -565,111 +421,22 @@ class FaceMeshEvent:
         return (left_pitch + right_pitch) / 2.0
 
     @property
-    def blendshapes(self) -> Optional[Dict]:
-        cached = self._cache_get("blendshapes")
-        if cached is not _CACHE_MISS:
-            return cached
-        return self._cache_set("blendshapes", self._face_item("face_blendshapes"))
-
-    @property
-    def transform_matrix(self) -> Optional[List]:
-        cached = self._cache_get("transform_matrix")
-        if cached is not _CACHE_MISS:
-            return cached
-        return self._cache_set(
-            "transform_matrix", self._face_item("facial_transformation_matrixes")
-        )
-
-    @property
-    def face_mask_segment(self):
-        for key in (
-            "face_mask_segments",
-            "face_mask_segment",
-            "face_masks",
-            "face_mask",
-            "segmentation_masks",
-            "segmentation_mask",
-        ):
-            value = self._face_item(key)
-            if value is not None:
-                return value
-        return None
-
-    @property
     def landmark_count(self) -> int:
-        cached = self._cache_get("landmark_count")
-        if cached is not _CACHE_MISS:
-            return cached
-
-        lms = self.landmarks
-        if lms is None:
-            return self._cache_set("landmark_count", 0)
-        try:
-            return self._cache_set("landmark_count", len(lms))
-        except Exception:
-            return self._cache_set("landmark_count", 0)
+        landmarks = self.landmarks
+        return 0 if landmarks is None else len(landmarks)
 
     def landmarks_as_list(self) -> Optional[List[List[float]]]:
-        lms = self.landmarks
-        if not lms:
-            return None
-        out: List[List[float]] = []
-        for lm in lms:
-            xyz = self._landmark_xyz(lm)
-            if xyz is not None:
-                out.append(xyz)
-        return out or None
+        landmarks = self.landmarks
+        return landmarks.tolist() if landmarks is not None else None
 
     def blendshapes_as_dict(self) -> Optional[Dict[str, float]]:
-        cats = self.blendshapes
-        if not cats:
+        if self.face is None or not self.face.blendshapes:
             return None
-        if isinstance(cats, dict):
-            return {str(k): safe_float(v) for k, v in cats.items()}
-        out: Dict[str, float] = {}
-        for cat in cats:
-            name = getattr(cat, "category_name", None)
-            score = getattr(cat, "score", None)
-            if name is not None and score is not None:
-                out[str(name)] = safe_float(score)
-        return out or None
+        return dict(self.face.blendshapes)
 
     def transform_matrix_as_flat(self) -> Optional[List[float]]:
-        m = self.transform_matrix
-        if m is None:
-            return None
-        if hasattr(m, "flatten"):
-            try:
-                return [safe_float(v) for v in m.flatten()]
-            except Exception:
-                pass
-        flat: List[float] = []
-        try:
-            for row in m:
-                if hasattr(row, "__iter__") and not isinstance(row, (str, bytes)):
-                    for val in row:
-                        flat.append(safe_float(val))
-                else:
-                    flat.append(safe_float(row))
-        except Exception:
-            return None
-        return flat or None
-
-    def face_mask_segment_meta(self) -> Optional[Dict[str, Any]]:
-        seg = self.face_mask_segment
-        if seg is None:
-            return None
-        meta: Dict[str, Any] = {"type": type(seg).__name__}
-        shape = getattr(seg, "shape", None)
-        if shape is not None:
-            try:
-                meta["shape"] = [int(v) for v in shape]
-            except Exception:
-                meta["shape"] = str(shape)
-        dtype = getattr(seg, "dtype", None)
-        if dtype is not None:
-            meta["dtype"] = str(dtype)
-        return meta
+        transform = self.transform_matrix
+        return transform.flatten().tolist() if transform is not None else None
 
     def eyes_dict(self) -> Dict[str, Any]:
         return {
@@ -702,7 +469,6 @@ class FaceMeshEvent:
             "landmarks": self.landmarks_as_list(),
             "blendshapes": self.blendshapes_as_dict(),
             "transformMatrix": self.transform_matrix_as_flat(),
-            "faceMaskSegment": self.face_mask_segment_meta(),
             "eyes": self.eyes_dict(),
             "geometryInputs": self.geometry_inputs(),
         }

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
+from capture_frame_flow import face_from_raw_result
 from facemesh_app.facemesh_dao import FaceMeshEvent
 
 
@@ -50,45 +51,11 @@ def extract_head_angles(
     """Head yaw, pitch and roll exactly as the runtime derives them."""
     if result.get("facial_transformation_matrix") is None:
         return None
-    event = FaceMeshEvent.from_landmarker_result(
-        _create_mock_result(result), image_size=image_size
+    event = FaceMeshEvent(
+        face_from_raw_result(result),
+        image_size=image_size,
     )
     return event.head_yaw, event.head_pitch, event.roll
-
-
-def _create_mock_result(raw_result: Dict[str, Any]) -> Any:
-    """Create a mock MediaPipe result object from raw JSON data."""
-    from types import SimpleNamespace
-
-    facial_transformation_matrix = raw_result.get("facial_transformation_matrix")
-    if facial_transformation_matrix is None:
-        return SimpleNamespace(
-            facial_transformation_matrixes=None,
-            face_landmarks=[],
-            face_blendshapes=[],
-        )
-
-    face_landmarks_data = raw_result.get("face_landmarks", [])
-    face_landmarks = []
-    for lm_data in face_landmarks_data:
-        if lm_data is None:
-            face_landmarks.append(None)
-        else:
-            face_landmarks.append(
-                SimpleNamespace(
-                    x=lm_data.get("x"),
-                    y=lm_data.get("y"),
-                    z=lm_data.get("z"),
-                )
-            )
-
-    class MockResult:
-        def __init__(self):
-            self.facial_transformation_matrixes = [facial_transformation_matrix]
-            self.face_landmarks = [face_landmarks]
-            self.face_blendshapes = []
-
-    return MockResult()
 
 
 def camera_image_size(data: Dict[str, Any]) -> Tuple[int, int]:
@@ -101,8 +68,9 @@ def extract_eye_gaze(
     result: Dict[str, Any], image_size: Tuple[int, int]
 ) -> Optional[Dict[str, float]]:
     """Extract eye gaze angles through FaceMeshEvent to match runtime math."""
-    event = FaceMeshEvent.from_landmarker_result(
-        _create_mock_result(result), image_size=image_size
+    event = FaceMeshEvent(
+        face_from_raw_result(result),
+        image_size=image_size,
     )
 
     left_yaw = event.left_eye_gaze_yaw
@@ -408,8 +376,8 @@ def analyze_yaw_consistency(data: Dict[str, Any]) -> bool:
             if eye_pos not in head_groups[head_pos]:
                 continue
             point = head_groups[head_pos][eye_pos]
-            event = FaceMeshEvent.from_landmarker_result(
-                _create_mock_result(point.get("rawResult", {})),
+            event = FaceMeshEvent(
+                face_from_raw_result(point.get("rawResult", {})),
                 image_size=image_size,
             )
             left_yaw = event.left_eye_gaze_yaw

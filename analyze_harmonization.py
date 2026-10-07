@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
+from capture_frame_flow import face_from_raw_result
 from facemesh_app.facemesh_dao import FaceMeshEvent
 from facemesh_app.harmonization_contract import (
     HARMONIZATION_PROMPTS,
@@ -65,40 +66,6 @@ def load_harmonization_data(data_dir: Path) -> Dict[str, Any]:
     }
 
 
-def _create_mock_result(raw_result: Dict[str, Any]) -> Any:
-    from types import SimpleNamespace
-
-    facial_transformation_matrix = raw_result.get("facial_transformation_matrix")
-    if facial_transformation_matrix is None:
-        return SimpleNamespace(
-            facial_transformation_matrixes=None,
-            face_landmarks=[],
-            face_blendshapes=[],
-        )
-
-    face_landmarks_data = raw_result.get("face_landmarks", [])
-    face_landmarks = []
-    for lm_data in face_landmarks_data:
-        if lm_data is None:
-            face_landmarks.append(None)
-        else:
-            face_landmarks.append(
-                SimpleNamespace(
-                    x=lm_data.get("x"),
-                    y=lm_data.get("y"),
-                    z=lm_data.get("z"),
-                )
-            )
-
-    class MockResult:
-        def __init__(self):
-            self.facial_transformation_matrixes = [facial_transformation_matrix]
-            self.face_landmarks = [face_landmarks]
-            self.face_blendshapes = []
-
-    return MockResult()
-
-
 def camera_image_size(data: Dict[str, Any]) -> Tuple[int, int]:
     """Frame size the landmarks were normalized against."""
     camera_info = data["cameraInfo"]
@@ -108,8 +75,9 @@ def camera_image_size(data: Dict[str, Any]) -> Tuple[int, int]:
 def extract_measurements(
     raw_result: Dict[str, Any], image_size: Tuple[int, int]
 ) -> Dict[str, Optional[float]]:
-    event = FaceMeshEvent.from_landmarker_result(
-        _create_mock_result(raw_result), image_size=image_size
+    event = FaceMeshEvent(
+        face_from_raw_result(raw_result),
+        image_size=image_size,
     )
     return {
         "head_yaw": event.head_yaw,

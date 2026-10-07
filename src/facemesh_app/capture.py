@@ -10,7 +10,6 @@ from typing import Optional, Dict, Tuple, List, Any
 
 import cv2
 import numpy as np
-from mediapipe.tasks.python import vision
 
 from .calibration import CalibratedFaceAndGazeEvent
 from .facemesh_dao import (
@@ -31,7 +30,6 @@ from .facemesh_dao import (
 
 
 CAPTURE_DIR = Path("captures")
-FACE_MESH_CONNECTIONS = list(vision.FaceLandmarksConnections.FACE_LANDMARKS_TESSELATION)
 WHITE = (255, 255, 255)
 RED = (0, 0, 255)
 GREEN = (80, 230, 120)
@@ -51,14 +49,8 @@ def ms_now():
 
 def _lm_to_px(lm, w, h, mirror_x: bool = False):
     """Convert landmark to pixel coordinates."""
-    if hasattr(lm, "x") and hasattr(lm, "y"):
-        lx = safe_float(getattr(lm, "x", 0.0), 0.0)
-        ly = safe_float(getattr(lm, "y", 0.0), 0.0)
-    elif isinstance(lm, (list, tuple)) and len(lm) >= 2:
-        lx = safe_float(lm[0], 0.0)
-        ly = safe_float(lm[1], 0.0)
-    else:
-        lx, ly = 0.0, 0.0
+    lx = safe_float(lm[0], 0.0)
+    ly = safe_float(lm[1], 0.0)
     if mirror_x:
         lx = 1.0 - lx
     x = int(clamp(round(lx * w), 0, w - 1))
@@ -73,16 +65,6 @@ def _fmt_num(value: Any, precision: int = 3) -> str:
     if math.isnan(v):
         return "n/a"
     return f"{v:.{precision}f}"
-
-
-def _safe_lm_xy(lm) -> Optional[Tuple[float, float]]:
-    if hasattr(lm, "x") and hasattr(lm, "y"):
-        return safe_float(getattr(lm, "x", 0.0), 0.0), safe_float(
-            getattr(lm, "y", 0.0), 0.0
-        )
-    if isinstance(lm, (list, tuple)) and len(lm) >= 2:
-        return safe_float(lm[0], 0.0), safe_float(lm[1], 0.0)
-    return None
 
 
 def _lm_points_px(
@@ -123,16 +105,6 @@ def _build_event_lines(snap_evt: Any, landmarks: List[Any]) -> List[str]:
                 "eye position mm="
                 f"{_fmt_num(position[0], 1)}/{_fmt_num(position[1], 1)}/{_fmt_num(position[2], 1)}"
             )
-
-        mask_meta = snap_evt.face_mask_segment_meta()
-        if mask_meta:
-            mask_shape = mask_meta.get("shape", "n/a")
-            mask_dtype = mask_meta.get("dtype", "n/a")
-            lines.append(
-                f"mask type={mask_meta.get('type', 'n/a')} shape={mask_shape} dtype={mask_dtype}"
-            )
-        else:
-            lines.append("mask: none")
 
         blendshape_map = snap_evt.blendshapes_as_dict() or {}
         lines.append(f"blendshapes={len(blendshape_map)}")
@@ -252,15 +224,11 @@ def build_camera_capture_marked_image(
     mirror_view = True
     img = cv2.flip(frame, 1) if mirror_view else frame.copy()
     fh, fw = img.shape[:2]
-    landmarks = snap.get("landmarks") or []
     snap_evt = snap.get("evt")
+    landmarks = snap_evt.landmarks if snap_evt is not None and snap_evt.has_face else np.empty((0, 3))
 
-    if landmarks:
-        for conn in FACE_MESH_CONNECTIONS:
-            a = int(conn.start)
-            b = int(conn.end)
-            if a >= len(landmarks) or b >= len(landmarks):
-                continue
+    if len(landmarks):
+        for a, b in snap_evt.mesh_edges:
             p1 = _lm_to_px(landmarks[a], fw, fh, mirror_x=mirror_view)
             p2 = _lm_to_px(landmarks[b], fw, fh, mirror_x=mirror_view)
             cv2.line(img, p1, p2, (45, 140, 45), 1, cv2.LINE_AA)
@@ -438,8 +406,7 @@ def save_capture(
     raw_png_path = CAPTURE_DIR / f"{base}_raw.png"
     json_path = CAPTURE_DIR / f"{base}.json"
 
-    snap_landmarks = list(evt.landmarks) if evt and evt.landmarks else None
-    snap = {"evt": evt, "frame": frame, "landmarks": snap_landmarks}
+    snap = {"evt": evt, "frame": frame}
     event_dump = evt.to_capture_dump() if evt is not None else None
     mesh_data = event_dump.get("meshData") if event_dump else None
 

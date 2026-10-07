@@ -9,15 +9,15 @@ THIRD_PARTY_LICENSES.txt.
 
 ------------------------------------------------------------------------
 
-MediaPipe
+MediaPipe Face Landmarker
     Copyright 2019-2024 The MediaPipe Authors.
     Licensed under the Apache License, Version 2.0.
     https://github.com/google-ai-edge/mediapipe
-
-face_landmarker.task (MediaPipe Face Landmarker model)
-    Copyright 2023 The MediaPipe Authors.
-    Licensed under the Apache License, Version 2.0.
-    https://developers.google.com/mediapipe/solutions/vision/face_landmarker
+    face_landmarker.task is the unmodified MediaPipe Face Landmarker model
+    bundle. The facemesh_app modules face_region, face_detector,
+    face_blendshapes, face_geometry, landmark_smoothing and face_landmarker
+    are Python ports of MediaPipe's face landmarker graph, changed to run the
+    bundle's models with OpenCV.
 
 OpenCV (opencv-python)
     Copyright (C) 2000-2024, Intel Corporation, Willow Garage, Itseez,

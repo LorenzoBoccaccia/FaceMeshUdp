@@ -3,9 +3,10 @@ Copyright (c) 2026 Lorenzo Boccaccia
 
 This product is licensed under the MIT License (see LICENSE).
 
-This product bundles third-party components listed below. Each component
-remains under its own license. Full license texts are provided in
-THIRD_PARTY_LICENSES.txt.
+The Windows release bundles the third-party components listed below. Each
+component remains under its own license. The release build writes their
+full license texts to THIRD_PARTY_LICENSES.txt from the environment the
+release is frozen in.
 
 ------------------------------------------------------------------------
 
@@ -23,27 +24,52 @@ OpenCV (opencv-python)
     Copyright (C) 2000-2024, Intel Corporation, Willow Garage, Itseez,
     OpenCV Foundation, and contributors.
     Licensed under the Apache License, Version 2.0.
+    Packaging scripts Copyright (c) Olli-Pekka Heinisuo, MIT License.
     https://github.com/opencv/opencv-python
+    The OpenCV binary includes the image codecs and libraries listed in
+    OpenCV's third-party license file, which is reproduced as published:
+    FFmpeg, Qt and the other libraries it names for Linux and macOS
+    packages, or for the FFmpeg video plugin, are not part of this release.
+
+Intel(R) Integrated Performance Primitives, inside the OpenCV binary
+    Copyright (C) 1997 Intel Corporation.
+    Redistributed in binary form, unmodified, under the Intel Simplified
+    Software License (Version October 2022).
 
 NumPy
-    Copyright (c) 2005-2024, NumPy Developers.
+    Copyright (c) 2005-2025, NumPy Developers.
     Licensed under the BSD 3-Clause License.
     https://github.com/numpy/numpy
+    Bundles OpenBLAS and LAPACK (BSD 3-Clause) and the GCC runtime library
+    (GPL-3.0-or-later with the GCC Runtime Library Exception).
 
 SciPy
-    Copyright (c) 2001-2024, SciPy Developers.
+    Copyright (c) 2001-2002 Enthought, Inc. 2003, SciPy Developers.
     Licensed under the BSD 3-Clause License.
     https://github.com/scipy/scipy
+    Bundles OpenBLAS and LAPACK (BSD 3-Clause) and the GCC runtime library
+    (GPL-3.0-or-later with the GCC Runtime Library Exception).
 
 pyglet
     Copyright (c) 2006-2008 Alex Holkner
     Copyright (c) 2008-2023 pyglet contributors
     Licensed under the BSD 3-Clause License.
     https://github.com/pyglet/pyglet
+    Includes pypng (MIT License) and earcut-python (ISC License).
 
-------------------------------------------------------------------------
+Python
+    Copyright (c) 2001 Python Software Foundation.
+    Licensed under the PSF License Agreement, with the libraries of its
+    Windows build (OpenSSL, libffi, bzip2, Tcl/Tk, zlib) under their own
+    licenses.
+    https://www.python.org
 
-The authoritative list of bundled Python packages and their versions can
-be obtained from the pip manifest of the build environment (see
-`pyproject.toml` for top-level requirements and pinned transitive
-dependencies for any given release).
+cx_Freeze
+    Copyright (c) 2025 Marcelo Duarte.
+    Licensed under the MIT License (frozen_application_license.txt). Its
+    launcher code is part of facemesh.exe.
+
+Microsoft Visual C++ runtime
+    Copyright Microsoft Corporation.
+    Redistributable runtime DLLs under Microsoft's license terms
+    (share/licenses/vc_redist/LICENSE.txt).

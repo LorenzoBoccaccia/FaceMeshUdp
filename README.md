@@ -100,7 +100,9 @@ Left-click the overlay in capture mode to write:
 task build-exe
 ```
 
-Builds `dist/facemesh/facemesh.exe` with PyInstaller from `facemesh.spec`; `task dist-zip` packs that
+Builds `dist/facemesh/facemesh.exe` with cx_Freeze (configured in `pyproject.toml`) from a fresh
+environment in `build/release-env` that holds only the app, its runtime dependencies and cx_Freeze,
+and writes `THIRD_PARTY_LICENSES.txt` for the components the build ships; `task dist-zip` packs that
 folder into `dist/facemesh-<version>-win64.zip`.
 
 ## Profiling

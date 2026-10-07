@@ -1,4 +1,4 @@
-"""Zip the PyInstaller --onedir output for distribution."""
+"""Zip the frozen release folder for distribution."""
 from __future__ import annotations
 
 import sys

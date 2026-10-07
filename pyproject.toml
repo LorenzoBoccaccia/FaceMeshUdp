@@ -12,7 +12,7 @@ license-files = ["LICENSE"]
 authors = [{name = "Lorenzo Boccaccia"}]
 requires-python = ">=3.10"
 dependencies = [
-  "opencv-python>=4.10.0.84",
+  "opencv-python>=4.13,<5",
   "numpy>=1.26.0",
   "scipy>=1.11.0",
   "pyglet>=2.1"
@@ -20,9 +20,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-  "pyinstaller>=6.11.0",
   "taskipy>=1.14.0",
   "yappi>=1.6.0"
+]
+release = [
+  "cx_Freeze>=8.7"
 ]
 
 [project.scripts]
@@ -36,5 +38,19 @@ where = ["src"]
 
 [tool.taskipy.tasks]
 run = "python -m facemesh_app.main"
-build-exe = ".\\.venv\\Scripts\\python -m PyInstaller --noconfirm facemesh.spec"
+build-exe = "python scripts/build_release.py"
 dist-zip = "python scripts/make_dist_zip.py"
+
+[tool.cxfreeze]
+executables = [{script = "src/facemesh_app/main.py", target_name = "facemesh"}]
+
+[tool.cxfreeze.build_exe]
+build_exe = "dist/facemesh"
+packages = ["pyglet"]
+bin_excludes = ["opencv_videoio_ffmpeg*.dll"]
+include_msvcr = true
+include_files = [
+  ["face_landmarker.task", "face_landmarker.task"],
+  ["LICENSE", "LICENSE"],
+  ["NOTICE", "NOTICE"]
+]
